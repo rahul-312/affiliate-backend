@@ -5,7 +5,7 @@ The single API behind the Affiliate Hub v1: affiliate sign-up and approval, comm
 | Repo | What it is | Stack |
 | --- | --- | --- |
 | **affiliate-backend** (this repo) | The one API and every business rule | Node.js 22, Express 5, MongoDB (Mongoose), zod, JWT |
-| [affiliate-dashboard](../affiliate-dashboard) | Internal tool for the ops (affiliate) and finance teams | Next.js 16 (App Router), TypeScript |
+| [affiliate-frontend](../affiliate-frontend) | Internal tool for the ops (affiliate) and finance teams | Next.js 16 (App Router), TypeScript |
 | [affiliate-mobile](../affiliate-mobile) | Affiliate-facing app, shipped as an Android APK | React Native, Expo SDK 58, Expo Router |
 
 ---
@@ -38,7 +38,7 @@ Landing pitch ─► sign up ─► "application received" ─► ops approves �
  (x-api-key webhook)       │ Express: ONE API     │              │ replica set       │
                            └──────────────────────┘              └───────────────────┘
  ┌─────────────────────┐          ▲
- │ affiliate-dashboard │──────────┘
+ │ affiliate-frontend │──────────┘
  │ Next.js (ops+fin)   │
  └─────────────────────┘
 ```
