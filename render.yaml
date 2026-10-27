@@ -1,0 +1,29 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+# Secrets marked sync:false are entered in the Render dashboard on first deploy.
+services:
+  - type: web
+    name: affiliate-backend
+    runtime: node
+    plan: free
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGODB_URI
+        sync: false # Atlas connection string (Atlas clusters are replica sets, so transactions work)
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CONVERSION_API_KEY
+        generateValue: true
+      - key: PAYOUT_DETAILS_KEY
+        sync: false # 64 hex chars: npm run gen:secrets
+      - key: CORS_ORIGINS
+        sync: false # the deployed dashboard origin, e.g. https://affiliate-dashboard.vercel.app
+      - key: DEMO_MODE
+        value: "true" # reviewer demo only; set to false for a real deployment
+      - key: TRUST_PROXY
+        value: "1"
+      - key: JWT_EXPIRES_IN
+        value: 7d
