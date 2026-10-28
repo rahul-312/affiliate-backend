@@ -24,4 +24,15 @@ const createApiLimiter = (max) =>
     message: limitExceeded('Too many requests. Please slow down.'),
   });
 
-module.exports = { createAuthLimiter, createApiLimiter };
+/** Per-user ceiling on account status changes (pause/resume): 20 an hour is plenty for a person. */
+const createAccountActionLimiter = () =>
+  rateLimit({
+    windowMs: 60 * 60 * 1000,
+    limit: 20,
+    keyGenerator: (req) => String(req.user._id),
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: limitExceeded('Too many changes to your account status. Please try again later.'),
+  });
+
+module.exports = { createAuthLimiter, createApiLimiter, createAccountActionLimiter };

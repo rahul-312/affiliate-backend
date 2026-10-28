@@ -6,7 +6,7 @@ const { maskPayoutDetails } = require('../../utils/payoutMethod');
 const { runInTransaction } = require('../../utils/transaction');
 const { recordAudit } = require('../audit/audit.service');
 const { getProgramSettings } = require('../program/program.service');
-const { classifyPayoutReadiness, hasPayoutDetails } = require('../payouts/payout.rules');
+const { classifyPayoutReadiness, hasPayoutDetails, isPayoutOnHold } = require('../payouts/payout.rules');
 const { formatBatchNo } = require('../serializers');
 
 /**
@@ -26,8 +26,10 @@ async function getSummary(user) {
 
   const approvedPaise = amount('approved');
   const hasDetails = hasPayoutDetails(user);
+  const onHold = isPayoutOnHold(user);
   const readiness = classifyPayoutReadiness({
     approvedPaise,
+    onHold,
     hasPayoutDetails: hasDetails,
     minPayoutPaise: settings.minPayoutPaise,
   });
@@ -41,6 +43,7 @@ async function getSummary(user) {
     availableForNextPayoutPaise: readiness === 'eligible' ? approvedPaise : 0,
     minPayoutPaise: settings.minPayoutPaise,
     hasPayoutDetails: hasDetails,
+    payoutsOnHold: approvedPaise > 0 && onHold,
     needsPayoutDetails: approvedPaise > 0 && !hasDetails,
     belowMinimum: approvedPaise > 0 && approvedPaise < settings.minPayoutPaise,
     commissionCount: totals.reduce((n, t) => n + t.count, 0),
@@ -83,14 +86,20 @@ async function listOwnPayouts(user) {
  * Available once the application is approved: there is nothing to pay before that.
  */
 async function updatePayoutMethod(user, details, { cipher }) {
-  if (user.role !== 'affiliate' || user.status !== 'active') {
+  // Allowed while active or self-paused (earned commissions are still paid then). Not while ops has
+  // deactivated the account: payouts are on hold and details shouldn't change mid-review.
+  const editable = { role: 'affiliate', $or: [{ status: 'active' }, { status: 'deactivated', deactivatedByRole: 'affiliate' }] };
+  if (user.role !== 'affiliate' || !['active', 'deactivated'].includes(user.status)) {
     throw forbidden('You can add payout details once your application is approved');
+  }
+  if (user.status === 'deactivated' && user.deactivatedByRole !== 'affiliate') {
+    throw forbidden('Your account is paused by the affiliate team, so payout details can’t be changed right now. Please contact them.');
   }
   const payoutMethod = { type: details.type, masked: maskPayoutDetails(details), updatedAt: new Date() };
 
   return runInTransaction(async (session) => {
     const updated = await User.findOneAndUpdate(
-      { _id: user._id, role: 'affiliate', status: 'active' },
+      { _id: user._id, ...editable },
       { $set: { payoutMethod, payoutDetailsCiphertext: cipher.encrypt(details) } },
       { new: true, session },
     );

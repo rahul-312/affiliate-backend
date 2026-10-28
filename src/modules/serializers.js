@@ -29,7 +29,10 @@ function serializeUser(user, { referralBaseUrl } = {}) {
       promotionChannel: user.promotionChannel ?? null,
       promotionUrl: user.promotionUrl ?? null,
       rejectionReason: user.status === 'rejected' ? (user.rejectionReason ?? null) : null,
+      deactivationReason: user.status === 'deactivated' ? (user.deactivationReason ?? null) : null,
+      deactivatedBy: user.status === 'deactivated' ? (user.deactivatedByRole ?? null) : null,
       approvedAt: user.approvedAt ?? null,
+      commissionRateBps: user.commissionRateBps ?? null,
       referralCode: user.referralCode ?? null,
       referralLinkActive: linkActive,
       referralLink: linkActive && referralBaseUrl ? `${referralBaseUrl}${encodeURIComponent(user.referralCode)}` : null,
@@ -69,8 +72,14 @@ function serializeCommission(commission, { includeHistory = false } = {}) {
 }
 
 function serializeBatchItem(item) {
+  const affiliate = item.affiliateId;
   return {
-    affiliate: affiliateRef(item.affiliateId),
+    affiliate: affiliateRef(affiliate),
+    // Ops deactivated this affiliate after the batch was created and the item isn't resolved yet.
+    onHold:
+      item.status === 'pending' && isPopulated(affiliate) && affiliate.status === 'deactivated' && affiliate.deactivatedByRole === 'ops',
+    // A CSV download left this affiliate out (they were on hold then); finance must say at confirm whether they were paid.
+    excludedFromExport: item.status === 'pending' && Boolean(item.excludedFromExport),
     amountPaise: item.amountPaise,
     commissionCount: item.commissionCount,
     status: item.status,

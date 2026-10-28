@@ -32,4 +32,8 @@ const payoutMethodBody = z.discriminatedUnion('type', [upiMethod, bankMethod]);
 
 const commissionsQuery = z.strictObject({ status: z.enum(COMMISSION_STATUSES).optional(), ...pagination });
 
-module.exports = { payoutMethodBody, commissionsQuery };
+// Optional when an affiliate pauses themselves; ops must always give one.
+const pauseBody = z.strictObject({ reason: z.string().trim().max(500).optional() });
+const emptyBody = z.strictObject({});
+
+module.exports = { payoutMethodBody, commissionsQuery, pauseBody, emptyBody };

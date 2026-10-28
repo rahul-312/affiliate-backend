@@ -20,6 +20,12 @@ const confirmBody = z.strictObject({
     .array(z.strictObject({ affiliateId: objectId, reason }))
     .max(1000)
     .default([]),
+  // Affiliates on hold whose transfer the bank had already sent: recorded as paid, with an audit entry.
+  heldPaidAcknowledged: z
+    .array(objectId)
+    .max(1000)
+    .refine((ids) => new Set(ids).size === ids.length, 'ids must be unique')
+    .default([]),
 });
 
 const cancelBody = z.strictObject({ reason: reason.optional() });
