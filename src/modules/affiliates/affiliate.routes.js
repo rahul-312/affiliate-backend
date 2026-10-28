@@ -1,7 +1,7 @@
 'use strict';
 
 const { Router } = require('express');
-const { z, objectId, reason, pagination } = require('../../utils/validation');
+const { z, objectId, reason, rateBps, pagination } = require('../../utils/validation');
 const { USER_STATUSES } = require('../../models/constants');
 const { validate } = require('../../middleware/validate');
 const { requireRole } = require('../../middleware/auth');
@@ -12,6 +12,10 @@ const affiliateService = require('./affiliate.service');
 const listQuery = z.strictObject({ status: z.enum(USER_STATUSES).optional(), ...pagination });
 const idParams = z.strictObject({ id: objectId });
 const rejectBody = z.strictObject({ reason });
+// Omitted rate → the program's standard rate at the moment of approval.
+const approveBody = z.strictObject({ rateBps: rateBps.optional() });
+const rateBody = z.strictObject({ rateBps });
+const emptyBody = z.strictObject({});
 
 function createAffiliateRouter({ config }) {
   const router = Router();
@@ -22,8 +26,21 @@ function createAffiliateRouter({ config }) {
     res.json(paginated(result.items.map(toJson), result));
   });
 
-  router.post('/:id/approve', requireRole('ops'), validate({ params: idParams }), async (req, res) => {
-    const user = await affiliateService.approveAffiliate(req.validated.params.id, actorFromUser(req.user));
+  router.post('/:id/approve', requireRole('ops'), validate({ params: idParams, body: approveBody }), async (req, res) => {
+    const user = await affiliateService.approveAffiliate(
+      req.validated.params.id,
+      req.validated.body.rateBps,
+      actorFromUser(req.user),
+    );
+    res.json(toJson(user));
+  });
+
+  router.patch('/:id/rate', requireRole('ops'), validate({ params: idParams, body: rateBody }), async (req, res) => {
+    const user = await affiliateService.setCommissionRate(
+      req.validated.params.id,
+      req.validated.body.rateBps,
+      actorFromUser(req.user),
+    );
     res.json(toJson(user));
   });
 
@@ -33,6 +50,20 @@ function createAffiliateRouter({ config }) {
       req.validated.body.reason,
       actorFromUser(req.user),
     );
+    res.json(toJson(user));
+  });
+
+  router.post('/:id/deactivate', requireRole('ops'), validate({ params: idParams, body: rejectBody }), async (req, res) => {
+    const user = await affiliateService.deactivateAffiliate(
+      req.validated.params.id,
+      req.validated.body.reason,
+      actorFromUser(req.user),
+    );
+    res.json(toJson(user));
+  });
+
+  router.post('/:id/reactivate', requireRole('ops'), validate({ params: idParams, body: emptyBody }), async (req, res) => {
+    const user = await affiliateService.reactivateAffiliate(req.validated.params.id, actorFromUser(req.user));
     res.json(toJson(user));
   });
 

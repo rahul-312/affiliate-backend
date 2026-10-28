@@ -68,7 +68,8 @@ async function recordConversion(input, { actor, source }, testHooks = {}) {
 
   try {
     return await runInTransaction(async (session) => {
-      const settings = await getProgramSettings(session);
+      // The affiliate's own rate, set at approval; affiliates approved before per-affiliate rates fall back to the program rate.
+      const rateBps = affiliate.commissionRateBps ?? (await getProgramSettings(session)).rateBps;
       const conversion = await new Conversion({
         orderId: input.orderId,
         referralCode: input.referralCode,
@@ -84,8 +85,8 @@ async function recordConversion(input, { actor, source }, testHooks = {}) {
         affiliateId: affiliate._id,
         conversionId: conversion._id,
         orderAmountPaise: input.orderAmountPaise,
-        rateBps: settings.rateBps,
-        amountPaise: calculateCommissionPaise(input.orderAmountPaise, settings.rateBps),
+        rateBps,
+        amountPaise: calculateCommissionPaise(input.orderAmountPaise, rateBps),
         status: 'pending',
         history: [historyEntry({ from: null, to: 'pending', actor, note: `Sale ${input.orderId} (${source})` })],
       }).save({ session });

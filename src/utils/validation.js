@@ -1,7 +1,7 @@
 'use strict';
 
 const { z } = require('zod');
-const { MAX_ORDER_AMOUNT_PAISE } = require('../models/constants');
+const { MAX_ORDER_AMOUNT_PAISE, MIN_AFFILIATE_RATE_BPS, MAX_AFFILIATE_RATE_BPS } = require('../models/constants');
 
 /** Shared zod building blocks so every route validates the same things the same way. */
 
@@ -22,6 +22,13 @@ const orderAmountPaise = z
   .int('must be a whole number of paise')
   .positive('must be greater than zero')
   .max(MAX_ORDER_AMOUNT_PAISE);
+
+// Basis points: 1250 = 12.5%.
+const rateBps = z
+  .number({ error: 'must be a whole number of basis points' })
+  .int('must be a whole number of basis points')
+  .min(MIN_AFFILIATE_RATE_BPS, `must be at least ${MIN_AFFILIATE_RATE_BPS / 100}%`)
+  .max(MAX_AFFILIATE_RATE_BPS, `must be at most ${MAX_AFFILIATE_RATE_BPS / 100}%`);
 
 const orderId = z
   .string()
@@ -47,4 +54,4 @@ const idList = z
   .max(200)
   .refine((ids) => new Set(ids).size === ids.length, 'ids must be unique');
 
-module.exports = { z, objectId, email, password, reason, orderAmountPaise, orderId, referralCode, pagination, idList };
+module.exports = { z, objectId, email, password, reason, orderAmountPaise, rateBps, orderId, referralCode, pagination, idList };
