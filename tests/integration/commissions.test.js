@@ -3,7 +3,7 @@
 const request = require('supertest');
 const { Commission, AuditLog, User } = require('../../src/models');
 const { connectTestDb, disconnectTestDb, resetDb, buildApp, createUser, createActors, authFor } = require('../helpers/harness');
-const { postConversion, nextOrderId, createApprovedCommission, addUpi } = require('../helpers/flows');
+const { postConversion, nextOrderId, createApprovedCommission, addUpi, createAndExportBatch } = require('../helpers/flows');
 
 const { app } = buildApp();
 let actors;
@@ -341,5 +341,53 @@ describe('pausing: payouts, payout details and takeovers', () => {
     const auth = await authFor(app, affiliate);
     for (let i = 0; i < 20; i += 1) await self(auth, i % 2 === 0 ? 'pause' : 'resume').expect(200);
     expect((await self(auth, 'pause')).status).toBe(429);
+  });
+
+  it('flags a hold placed after a draft batch, refuses its export, and leaves the affiliate out of a new batch', async () => {
+    const held = await payable();
+    const other = await payable();
+    const draft = await request(app).post('/api/admin/payouts').set(actors.financeAuth).expect(201);
+    const batchId = draft.body.batch.id;
+    await admin(held.affiliate, 'deactivate', { reason: 'Fraud review' }).expect(200);
+
+    const detail = await request(app).get(`/api/admin/payouts/${batchId}`).set(actors.financeAuth).expect(200);
+    const onHold = Object.fromEntries(detail.body.items.map((i) => [i.affiliate.id, i.onHold]));
+    expect(onHold).toEqual({ [String(held.affiliate._id)]: true, [String(other.affiliate._id)]: false });
+
+    const exported = await request(app).get(`/api/admin/payouts/${batchId}/export.csv`).set(actors.financeAuth);
+    expect(exported.status).toBe(409);
+    expect(exported.body.error.code).toBe('PAYOUT_ON_HOLD');
+    expect(exported.body.error.message).toMatch(/Cancel this draft/);
+
+    await request(app).post(`/api/admin/payouts/${batchId}/cancel`).set(actors.financeAuth).send({}).expect(200);
+    const fresh = await request(app).post('/api/admin/payouts').set(actors.financeAuth).expect(201);
+    expect(fresh.body.batch.items.map((i) => i.affiliate.id)).toEqual([String(other.affiliate._id)]);
+
+    const stats = await request(app).get('/api/admin/stats').set(actors.financeAuth).expect(200);
+    expect(stats.body.onHold).toEqual({ count: 1, amountPaise: 50000 });
+  });
+
+  it('will not confirm an exported batch that pays a held affiliate unless they are marked failed', async () => {
+    const held = await payable();
+    const other = await payable();
+    const { batchId } = await createAndExportBatch(app, actors.financeAuth);
+    await admin(held.affiliate, 'deactivate', { reason: 'Fraud review' }).expect(200);
+    const confirm = (failedItems) =>
+      request(app).post(`/api/admin/payouts/${batchId}/confirm`).set(actors.financeAuth).send({ paymentReference: 'UTR777', failedItems });
+
+    const refused = await confirm([]);
+    expect(refused.status).toBe(409);
+    expect(refused.body.error.code).toBe('PAYOUT_ON_HOLD');
+    expect(refused.body.error.details.affiliates).toEqual([{ affiliateId: String(held.affiliate._id), name: held.affiliate.name }]);
+
+    const ok = await confirm([{ affiliateId: String(held.affiliate._id), reason: 'Payout on hold: affiliate deactivated' }]);
+    expect(ok.status).toBe(200);
+    expect((await Commission.find({ affiliateId: held.affiliate._id }).lean()).map((c) => c.status)).toEqual(['approved']);
+    expect((await Commission.find({ affiliateId: other.affiliate._id }).lean()).map((c) => c.status)).toEqual(['paid']);
+
+    // Still held: the next batch has nothing to pay.
+    const next = await request(app).post('/api/admin/payouts').set(actors.financeAuth);
+    expect(next.status).toBe(409);
+    expect(next.body.error.details.skippedOnHold).toBe(1);
   });
 });

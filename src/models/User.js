@@ -44,6 +44,7 @@ const userSchema = new Schema(
     // 'affiliate' when they paused themselves (they may resume), 'ops' when the team did (only ops may reactivate).
     deactivatedByRole: { type: String, enum: ['affiliate', 'ops'] },
     deactivatedAt: Date,
+    lastSaleAt: Date,
   },
   {
     timestamps: true,

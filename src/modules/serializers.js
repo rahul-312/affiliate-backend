@@ -72,8 +72,11 @@ function serializeCommission(commission, { includeHistory = false } = {}) {
 }
 
 function serializeBatchItem(item) {
+  const affiliate = item.affiliateId;
   return {
-    affiliate: affiliateRef(item.affiliateId),
+    affiliate: affiliateRef(affiliate),
+    // Ops deactivated this affiliate after the batch was created: their payout is on hold.
+    onHold: isPopulated(affiliate) && affiliate.status === 'deactivated' && affiliate.deactivatedByRole === 'ops',
     amountPaise: item.amountPaise,
     commissionCount: item.commissionCount,
     status: item.status,

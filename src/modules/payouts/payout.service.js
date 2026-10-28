@@ -9,9 +9,9 @@ const { badRequest, conflict, notFound, isDuplicateKeyError } = require('../../u
 const { recordAudit } = require('../audit/audit.service');
 const { historyEntry } = require('../commissions/commissionStateMachine');
 const { formatBatchNo } = require('../serializers');
-const { computePayoutEligibility, publicEntry } = require('./payout.rules');
+const { computePayoutEligibility, publicEntry, isPayoutOnHold } = require('./payout.rules');
 
-const AFFILIATE_FIELDS = 'name email referralCode';
+const AFFILIATE_FIELDS = 'name email referralCode status deactivatedByRole';
 
 const inconsistent = () =>
   conflict('Batch records are inconsistent with its commissions; nothing was changed', undefined, 'BATCH_INCONSISTENT');
@@ -124,6 +124,22 @@ async function getBatch(id) {
   return batch;
 }
 
+/**
+ * Items in this batch whose affiliate ops has deactivated since the batch was
+ * created. Their payouts are on hold, so they must not be paid from this batch.
+ */
+async function findHeldItems(batch, session) {
+  const users = await User.find({ _id: { $in: batch.items.map((i) => i.affiliateId) } }, { name: 1, status: 1, deactivatedByRole: 1 })
+    .session(session ?? null)
+    .lean();
+  const held = new Map(users.filter(isPayoutOnHold).map((u) => [String(u._id), u.name]));
+  return batch.items
+    .filter((i) => held.has(String(i.affiliateId)))
+    .map((i) => ({ affiliateId: String(i.affiliateId), name: held.get(String(i.affiliateId)) }));
+}
+
+const heldNames = (held) => held.map((h) => h.name).join(', ');
+
 async function getMissingPayoutDetails() {
   const { missingDetails, minPayoutPaise } = await computePayoutEligibility();
   return { minPayoutPaise, items: missingDetails.map(publicEntry) };
@@ -143,6 +159,18 @@ async function exportBatchCsv(id, actor, { cipher }) {
   const batch = await loadBatch(id);
   if (!['draft', 'exported'].includes(batch.status)) {
     throw conflict(`A ${batch.status} batch cannot be exported`, undefined, 'INVALID_TRANSITION');
+  }
+
+  // Never hand finance bank details for someone whose payouts are on hold.
+  const held = await findHeldItems(batch);
+  if (held.length > 0) {
+    throw conflict(
+      batch.status === 'draft'
+        ? `Payouts are on hold for ${heldNames(held)}. Cancel this draft and create a new batch: held affiliates are left out automatically.`
+        : `Payouts are on hold for ${heldNames(held)}. Do not pay them from this batch: confirm it with them marked as failed.`,
+      { affiliates: held },
+      'PAYOUT_ON_HOLD',
+    );
   }
 
   const affiliateIds = batch.items.map((item) => item.affiliateId);
@@ -219,6 +247,17 @@ async function confirmBatch(id, { paymentReference, failedItems }, actor) {
     }
     const failedReasons = validateFailedItems(batch, failedItems);
     if (batch.items.some((item) => item.status !== 'pending')) throw inconsistent();
+
+    // Affiliates put on hold after the batch was created can't be marked paid: list them as failed,
+    // and their commissions go back to approved, where the hold keeps them out of later batches.
+    const unpaidHeld = (await findHeldItems(batch, session)).filter((h) => !failedReasons.has(h.affiliateId));
+    if (unpaidHeld.length > 0) {
+      throw conflict(
+        `Payouts are on hold for ${heldNames(unpaidHeld)}. Mark them as failed to confirm this batch.`,
+        { affiliates: unpaidHeld },
+        'PAYOUT_ON_HOLD',
+      );
+    }
 
     const commissions = await Commission.find(
       { payoutBatchId: batch._id, status: 'processing' },

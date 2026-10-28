@@ -78,7 +78,7 @@ cp .env.example .env
 npm run gen:secrets      # prints JWT_SECRET, CONVERSION_API_KEY and PAYOUT_DETAILS_KEY: paste them into .env
 npm run seed             # resets the DB to the demo state below
 npm run dev              # http://localhost:4000/api
-npm test                 # 125 tests, in-memory MongoDB replica set (no setup needed)
+npm test                 # 127 tests, in-memory MongoDB replica set (no setup needed)
 npm run lint
 ```
 
@@ -190,7 +190,7 @@ Amounts are rupees with two decimals, converted from paise only at export. Cells
 - **Payload-aware idempotency for sales.** The same `orderId` with the same payload is a safe retry (`200`). The same `orderId` with a different amount or code is a conflict (`409`, naming the differing fields), never silently treated as a duplicate. Conversion + commission + audit entry are written in one transaction. A concurrent duplicate is resolved outside the aborted transaction.
 - **CSV + manual confirmation instead of a payment gateway.** This is honest for v1: finance can operate it today, and the reference + per-item failure model maps cleanly onto a gateway later.
 - **Commission rate per affiliate, set at approval.** Ops picks the rate when approving (prefilled with the program's standard rate) and can change it later from the dashboard. A change applies to new sales only, because each commission keeps the rate it was created with, and every change is in the audit log. The app shows the standard rate as a guide and each affiliate's own rate once approved.
-- **Pausing without losing history.** An affiliate can pause themselves from the app and resume later: the link is off and new sales are refused, but what they already earned is still paid and they can keep their payout details up to date. Ops can deactivate an affiliate (reason required), including taking over a self-pause: then **payouts are held** (skipped by batch creation and listed as on hold) and payout details are locked until ops reactivates them, which suits a fraud review. Rate and referral code are kept either way. Affiliates approved before per-affiliate rates can be given a stored rate with `npm run backfill:rates`.
+- **Pausing without losing history.** An affiliate can pause themselves from the app and resume later: the link is off and new sales are refused, but what they already earned is still paid and they can keep their payout details up to date. Ops can deactivate an affiliate (reason required), including taking over a self-pause: then **payouts are held**: batch creation skips them, and if they were already in an open batch its CSV export is refused and confirm requires them to be marked failed, so a deactivation on payout day still stops the money and payout details are locked until ops reactivates them, which suits a fraud review. Rate and referral code are kept either way. Affiliates approved before per-affiliate rates can be given a stored rate with `npm run backfill:rates`.
 - **Referral link activates only on approval.** Sign-up stays frictionless, while unvetted accounts can't earn: conversions for non-active affiliates are refused.
 - **Payout details after approval, not at sign-up.** A shorter form converts better, and sensitive data is only requested once there's a reason to give it.
 - **Security posture** (beyond the plan's baseline):

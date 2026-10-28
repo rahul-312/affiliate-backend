@@ -69,8 +69,14 @@ async function recordConversion(input, { actor, source }, testHooks = {}) {
 
   try {
     return await runInTransaction(async (session) => {
-      // ...then re-read inside it, so the status and rate used are the ones committed with the sale.
+      // ...then re-read it inside, and write to the affiliate record. That write makes a concurrent
+      // deactivation or rate change conflict with this sale: the driver retries the transaction, and the
+      // retry sees the committed status and rate.
       const affiliate = await findEligibleAffiliate(input.referralCode, session);
+      const touched = await User.updateOne({ _id: affiliate._id, status: 'active' }, { $set: { lastSaleAt: new Date() } }, { session });
+      if (touched.modifiedCount !== 1) {
+        throw unprocessable('This referral code is not active, so the sale cannot earn a commission');
+      }
       // The affiliate's own rate, set at approval; affiliates approved before per-affiliate rates fall back to the program rate.
       const rateBps = affiliate.commissionRateBps ?? (await getProgramSettings(session)).rateBps;
       const conversion = await new Conversion({

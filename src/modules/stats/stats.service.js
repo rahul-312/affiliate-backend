@@ -33,6 +33,7 @@ async function getOverviewStats() {
     paidThisMonthPaise: paidThisMonth[0]?.amountPaise ?? 0,
     readyForPayoutPaise: eligibility.eligible.reduce((sum, e) => sum + e.amountPaise, 0),
     missingPayoutDetailsCount: eligibility.missingDetails.length,
+    onHold: { count: eligibility.onHold.length, amountPaise: eligibility.onHold.reduce((sum, e) => sum + e.amountPaise, 0) },
     openBatch: openBatch
       ? { id: String(openBatch._id), batchNo: formatBatchNo(openBatch.batchNo), status: openBatch.status, originalTotalPaise: openBatch.originalTotalPaise }
       : null,
