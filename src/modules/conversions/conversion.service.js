@@ -37,8 +37,8 @@ async function resolveExistingOrder(existing, input) {
   return { conversion: existing, commission, created: false };
 }
 
-async function findEligibleAffiliate(referralCode) {
-  const affiliate = await User.findOne({ referralCode, role: 'affiliate' }).lean();
+async function findEligibleAffiliate(referralCode, session) {
+  const affiliate = await User.findOne({ referralCode, role: 'affiliate' }).session(session ?? null).lean();
   if (!affiliate || affiliate.status !== 'active') {
     throw unprocessable('This referral code is not active, so the sale cannot earn a commission');
   }
@@ -64,11 +64,21 @@ async function recordConversion(input, { actor, source }, testHooks = {}) {
   const existing = await Conversion.findOne({ orderId: input.orderId });
   if (existing) return resolveExistingOrder(existing, input);
 
-  const affiliate = await findEligibleAffiliate(input.referralCode);
+  // Fail fast outside the transaction for an ineligible code...
+  await findEligibleAffiliate(input.referralCode);
 
   try {
     return await runInTransaction(async (session) => {
-      const settings = await getProgramSettings(session);
+      // ...then re-read it inside, and write to the affiliate record. That write makes a concurrent
+      // deactivation or rate change conflict with this sale: the driver retries the transaction, and the
+      // retry sees the committed status and rate.
+      const affiliate = await findEligibleAffiliate(input.referralCode, session);
+      const touched = await User.updateOne({ _id: affiliate._id, status: 'active' }, { $set: { lastSaleAt: new Date() } }, { session });
+      if (touched.modifiedCount !== 1) {
+        throw unprocessable('This referral code is not active, so the sale cannot earn a commission');
+      }
+      // The affiliate's own rate, set at approval; affiliates approved before per-affiliate rates fall back to the program rate.
+      const rateBps = affiliate.commissionRateBps ?? (await getProgramSettings(session)).rateBps;
       const conversion = await new Conversion({
         orderId: input.orderId,
         referralCode: input.referralCode,
@@ -84,8 +94,8 @@ async function recordConversion(input, { actor, source }, testHooks = {}) {
         affiliateId: affiliate._id,
         conversionId: conversion._id,
         orderAmountPaise: input.orderAmountPaise,
-        rateBps: settings.rateBps,
-        amountPaise: calculateCommissionPaise(input.orderAmountPaise, settings.rateBps),
+        rateBps,
+        amountPaise: calculateCommissionPaise(input.orderAmountPaise, rateBps),
         status: 'pending',
         history: [historyEntry({ from: null, to: 'pending', actor, note: `Sale ${input.orderId} (${source})` })],
       }).save({ session });

@@ -23,7 +23,7 @@ function createCorsOptions(allowedOrigins) {
   return {
     // Requests without an Origin header (the mobile app, server-to-server) are not subject to CORS.
     origin: (origin, callback) => callback(null, !origin || allowed.has(origin)),
-    methods: ['GET', 'POST', 'PUT'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH'],
     allowedHeaders: ['Authorization', 'Content-Type'],
     exposedHeaders: ['Content-Disposition'],
     maxAge: 600,

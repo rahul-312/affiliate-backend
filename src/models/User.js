@@ -1,7 +1,14 @@
 'use strict';
 
 const { Schema, model } = require('mongoose');
-const { ROLES, USER_STATUSES, PROMOTION_CHANNELS, PAYOUT_METHOD_TYPES } = require('./constants');
+const {
+  ROLES,
+  USER_STATUSES,
+  PROMOTION_CHANNELS,
+  PAYOUT_METHOD_TYPES,
+  MIN_AFFILIATE_RATE_BPS,
+  MAX_AFFILIATE_RATE_BPS,
+} = require('./constants');
 
 /** Display-safe summary of payout details. Full details live encrypted in payoutDetailsCiphertext. */
 const payoutMethodSchema = new Schema(
@@ -24,12 +31,20 @@ const userSchema = new Schema(
     promotionUrl: { type: String, trim: true },
     rejectionReason: { type: String, trim: true },
     referralCode: { type: String, unique: true, sparse: true },
+    // Set by ops at approval; snapshotted onto each new commission. Unset means the program rate.
+    commissionRateBps: { type: Number, min: MIN_AFFILIATE_RATE_BPS, max: MAX_AFFILIATE_RATE_BPS, validate: Number.isInteger },
     payoutMethod: { type: payoutMethodSchema, default: undefined },
     payoutDetailsCiphertext: { type: String, select: false },
     approvedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     approvedAt: Date,
     rejectedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     rejectedAt: Date,
+    deactivationReason: { type: String, trim: true },
+    deactivatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    // 'affiliate' when they paused themselves (they may resume), 'ops' when the team did (only ops may reactivate).
+    deactivatedByRole: { type: String, enum: ['affiliate', 'ops'] },
+    deactivatedAt: Date,
+    lastSaleAt: Date,
   },
   {
     timestamps: true,

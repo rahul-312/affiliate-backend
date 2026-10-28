@@ -9,9 +9,9 @@ const { badRequest, conflict, notFound, isDuplicateKeyError } = require('../../u
 const { recordAudit } = require('../audit/audit.service');
 const { historyEntry } = require('../commissions/commissionStateMachine');
 const { formatBatchNo } = require('../serializers');
-const { computePayoutEligibility, publicEntry } = require('./payout.rules');
+const { computePayoutEligibility, publicEntry, isPayoutOnHold } = require('./payout.rules');
 
-const AFFILIATE_FIELDS = 'name email referralCode';
+const AFFILIATE_FIELDS = 'name email referralCode status deactivatedByRole';
 
 const inconsistent = () =>
   conflict('Batch records are inconsistent with its commissions; nothing was changed', undefined, 'BATCH_INCONSISTENT');
@@ -45,11 +45,11 @@ async function createBatch(actor) {
       });
       await batch.save({ session });
 
-      const { eligible, missingDetails, belowMinimum } = await computePayoutEligibility(session);
+      const { eligible, onHold, missingDetails, belowMinimum } = await computePayoutEligibility(session);
       if (eligible.length === 0) {
         throw conflict(
           'No commissions are ready for payout',
-          { skippedMissingDetails: missingDetails.length, skippedBelowMinimum: belowMinimum.length },
+          { skippedMissingDetails: missingDetails.length, skippedBelowMinimum: belowMinimum.length, skippedOnHold: onHold.length },
           'NOTHING_TO_PAY',
         );
       }
@@ -89,7 +89,11 @@ async function createBatch(actor) {
 
       return {
         batch,
-        skipped: { missingDetails: missingDetails.map(publicEntry), belowMinimum: belowMinimum.map(publicEntry) },
+        skipped: {
+          missingDetails: missingDetails.map(publicEntry),
+          belowMinimum: belowMinimum.map(publicEntry),
+          onHold: onHold.map(publicEntry),
+        },
       };
     });
   } catch (err) {
@@ -120,6 +124,22 @@ async function getBatch(id) {
   return batch;
 }
 
+/**
+ * Items in this batch whose affiliate ops has deactivated since the batch was
+ * created. Their payouts are on hold, so they must not be paid from this batch.
+ */
+async function findHeldItems(batch, session) {
+  const users = await User.find({ _id: { $in: batch.items.map((i) => i.affiliateId) } }, { name: 1, status: 1, deactivatedByRole: 1 })
+    .session(session ?? null)
+    .lean();
+  const held = new Map(users.filter(isPayoutOnHold).map((u) => [String(u._id), u.name]));
+  return batch.items
+    .filter((i) => held.has(String(i.affiliateId)))
+    .map((i) => ({ affiliateId: String(i.affiliateId), name: held.get(String(i.affiliateId)) }));
+}
+
+const heldNames = (held) => held.map((h) => h.name).join(', ');
+
 async function getMissingPayoutDetails() {
   const { missingDetails, minPayoutPaise } = await computePayoutEligibility();
   return { minPayoutPaise, items: missingDetails.map(publicEntry) };
@@ -130,10 +150,22 @@ const CSV_HEADER = Object.freeze([
   'amount_inr', 'commission_count', 'narration',
 ]);
 
+const heldInDraft = (held) =>
+  conflict(
+    `Payouts are on hold for ${heldNames(held)}. Cancel this draft and create a new batch: held affiliates are left out automatically.`,
+    { affiliates: held },
+    'PAYOUT_ON_HOLD',
+  );
+
 /**
  * Builds the bank-upload CSV. This is the only place full payout details are
  * ever decrypted. Downloading is not proof of payment, so it changes no
  * commission status; the first download moves the batch from draft to exported.
+ *
+ * Bank details are never handed out for an affiliate whose payouts are on hold:
+ * a draft containing one can't be exported at all, and re-downloading an
+ * exported batch leaves held affiliates out (their transfer may already have
+ * been sent from the first download; finance records what happened at confirm).
  */
 async function exportBatchCsv(id, actor, { cipher }) {
   const batch = await loadBatch(id);
@@ -141,12 +173,17 @@ async function exportBatchCsv(id, actor, { cipher }) {
     throw conflict(`A ${batch.status} batch cannot be exported`, undefined, 'INVALID_TRANSITION');
   }
 
-  const affiliateIds = batch.items.map((item) => item.affiliateId);
+  const held = await findHeldItems(batch);
+  if (held.length > 0 && batch.status === 'draft') throw heldInDraft(held);
+  const heldIds = new Set(held.map((h) => h.affiliateId));
+  const exportItems = batch.items.filter((item) => !heldIds.has(String(item.affiliateId)));
+
+  const affiliateIds = exportItems.map((item) => item.affiliateId);
   const users = await User.find({ _id: { $in: affiliateIds } }).select('+payoutDetailsCiphertext').lean();
   const usersById = new Map(users.map((u) => [String(u._id), u]));
   const label = formatBatchNo(batch.batchNo);
 
-  const rows = batch.items.map((item) => {
+  const rows = exportItems.map((item) => {
     const user = usersById.get(String(item.affiliateId));
     if (!user?.payoutDetailsCiphertext) throw inconsistent();
     const details = cipher.decrypt(user.payoutDetailsCiphertext);
@@ -176,8 +213,22 @@ async function exportBatchCsv(id, actor, { cipher }) {
           )
         : await PayoutBatch.findOne({ _id: batch._id, status: 'exported' }).session(session);
     if (!stillOpen) throw conflict('This batch changed while exporting. Refresh and try again.', undefined, 'INVALID_TRANSITION');
+    // Re-check inside the transaction: a hold placed while the CSV was being built must not slip through.
+    const heldNow = await findHeldItems(batch, session);
+    if (heldNow.some((h) => !heldIds.has(h.affiliateId))) {
+      if (batch.status === 'draft') throw heldInDraft(heldNow);
+      throw conflict('A payout was put on hold while exporting. Download the CSV again.', { affiliates: heldNow }, 'PAYOUT_ON_HOLD');
+    }
+    if (held.length > 0) {
+      await PayoutBatch.updateOne(
+        { _id: batch._id, status: 'exported' },
+        { $set: { 'items.$[held].excludedFromExport': true } },
+        { arrayFilters: [{ 'held.affiliateId': { $in: held.map((h) => h.affiliateId) } }], session },
+      );
+    }
+    const note = held.length > 0 ? `${label}, left out on hold: ${heldNames(held)}` : label;
     await recordAudit(
-      [{ actor, entity: 'PayoutBatch', entityId: batch._id, action: 'export', from: batch.status, to: 'exported', note: label }],
+      [{ actor, entity: 'PayoutBatch', entityId: batch._id, action: 'export', from: batch.status, to: 'exported', note }],
       session,
     );
   });
@@ -203,8 +254,15 @@ function validateFailedItems(batch, failedItems) {
  * resolved exactly once: listed items fail (their commissions go back to
  * approved and are retried next batch), every other item is paid. All
  * counts and amounts are checked against the commissions before commit.
+ *
+ * Some items need an explicit answer, because the system can't know whether the
+ * bank paid them: affiliates on hold now, and affiliates any CSV download left
+ * out (even if their hold has since been lifted, the file finance used may not
+ * have included them). Finance lists each in failedItems (not sent) or in
+ * heldPaidAcknowledged (the bank sent it; recorded as paid and audited).
+ * Guessing either way risks paying twice or recording money that never moved.
  */
-async function confirmBatch(id, { paymentReference, failedItems }, actor) {
+async function confirmBatch(id, { paymentReference, failedItems, heldPaidAcknowledged }, actor) {
   return runInTransaction(async (session) => {
     const batch = await loadBatch(id, session);
     if (batch.status === 'draft') {
@@ -215,6 +273,37 @@ async function confirmBatch(id, { paymentReference, failedItems }, actor) {
     }
     const failedReasons = validateFailedItems(batch, failedItems);
     if (batch.items.some((item) => item.status !== 'pending')) throw inconsistent();
+
+    const held = await findHeldItems(batch, session);
+    const heldIds = new Set(held.map((h) => h.affiliateId));
+    const names = new Map(held.map((h) => [h.affiliateId, h.name]));
+    const excluded = batch.items.filter((i) => i.excludedFromExport).map((i) => String(i.affiliateId));
+    if (excluded.some((affiliateId) => !names.has(affiliateId))) {
+      const users = await User.find({ _id: { $in: excluded } }, { name: 1 }).session(session).lean();
+      for (const u of users) if (!names.has(String(u._id))) names.set(String(u._id), u.name);
+    }
+    const needsDecision = new Set([...heldIds, ...excluded]);
+    const paidWhileHeld = new Set(heldPaidAcknowledged);
+    const notHeld = heldPaidAcknowledged.filter((affiliateId) => !needsDecision.has(affiliateId));
+    if (notHeld.length > 0) {
+      throw badRequest(
+        'heldPaidAcknowledged lists affiliates that were neither on hold nor left out of an export. Refresh the batch and try again.',
+        { affiliateIds: notHeld },
+      );
+    }
+    if (heldPaidAcknowledged.some((affiliateId) => failedReasons.has(affiliateId))) {
+      throw badRequest('An affiliate cannot be both failed and acknowledged as paid');
+    }
+    const undecided = [...needsDecision]
+      .filter((affiliateId) => !failedReasons.has(affiliateId) && !paidWhileHeld.has(affiliateId))
+      .map((affiliateId) => ({ affiliateId, name: names.get(affiliateId) ?? affiliateId }));
+    if (undecided.length > 0) {
+      throw conflict(
+        `Say whether the bank already sent the transfer for ${heldNames(undecided)} (on hold, or left out of a CSV download): mark it as failed if not, or acknowledge it as paid if it went out. If this doesn't match what you see, refresh the batch.`,
+        { affiliates: undecided },
+        'PAYOUT_ON_HOLD',
+      );
+    }
 
     const commissions = await Commission.find(
       { payoutBatchId: batch._id, status: 'processing' },
@@ -236,7 +325,10 @@ async function confirmBatch(id, { paymentReference, failedItems }, actor) {
       const reason = failedReasons.get(affiliateKey);
       const failed = reason !== undefined;
       const to = failed ? 'approved' : 'paid';
-      const note = failed ? `Payout ${label} failed: ${reason}. Retrying in the next payout.` : `Paid in ${label} (ref ${paymentReference})`;
+      const heldPaid = paidWhileHeld.has(affiliateKey);
+      const note = failed
+        ? `Payout ${label} failed: ${reason}. ${heldIds.has(affiliateKey) ? 'On hold until the affiliate team reactivates the account.' : 'Retrying in the next payout.'}`
+        : `Paid in ${label} (ref ${paymentReference})${heldPaid ? '; finance confirmed the bank sent it although the payout was on hold or left out of a CSV download' : ''}`;
       const update = await Commission.updateMany(
         { _id: { $in: own.map((c) => c._id) }, payoutBatchId: batch._id, status: 'processing' },
         {
@@ -254,6 +346,15 @@ async function confirmBatch(id, { paymentReference, failedItems }, actor) {
       auditEntries.push(
         ...own.map((c) => ({ actor, entity: 'Commission', entityId: c._id, action: failed ? 'payout_failed' : 'pay', from: 'processing', to, note: failed ? reason : label })),
       );
+      if (heldPaid) {
+        auditEntries.push({
+          actor,
+          entity: 'User',
+          entityId: item.affiliateId,
+          action: 'held_payout_acknowledged_paid',
+          note: `${label}: finance confirmed the bank sent ${paiseToRupeeString(item.amountPaise)} although it was on hold or left out of a CSV download`,
+        });
+      }
     }
 
     if (paidPaise + failedPaise !== batch.originalTotalPaise) throw inconsistent();

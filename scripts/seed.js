@@ -28,7 +28,7 @@ const DEMO_PASSWORD = 'demo1234';
 
 const PROGRAM = {
   name: 'Affiliate Hub',
-  headline: 'Earn 10% on every sale you refer',
+  headline: 'Earn a commission on every sale you refer',
   rateBps: 1000,
   qualifyingRules: [
     'The customer buys through your referral link or enters your referral code at checkout',
@@ -39,7 +39,7 @@ const PROGRAM = {
   minPayoutPaise: 50000,
   steps: [
     'Apply in under a minute: tell us where you will promote',
-    'We review your application, usually within 1 business day',
+    'We review your application and set your commission rate, usually within 1 business day',
     'Once approved, your referral link goes live: share it anywhere',
     'Add your UPI ID or bank account so we can pay you',
     'Get paid automatically in the next payout run',
@@ -89,12 +89,12 @@ async function seed() {
   const affiliate = await createUser({
     name: 'Asha Verma', email: 'affiliate@demo.com', role: 'affiliate', status: 'active',
     promotionChannel: 'instagram', promotionUrl: 'https://instagram.com/asha.styles',
-    referralCode: 'ASHA2026', approvedBy: ops._id, approvedAt: new Date(),
+    referralCode: 'ASHA2026', approvedBy: ops._id, approvedAt: new Date(), commissionRateBps: 1000,
   });
   const noDetails = await createUser({
     name: 'Nikhil Rao', email: 'nodetails@demo.com', role: 'affiliate', status: 'active',
     promotionChannel: 'youtube', promotionUrl: 'https://youtube.com/@nikhiltech',
-    referralCode: 'NIKHIL26', approvedBy: ops._id, approvedAt: new Date(),
+    referralCode: 'NIKHIL26', approvedBy: ops._id, approvedAt: new Date(), commissionRateBps: 1200,
   });
   await createUser({
     name: 'Pooja Shah', email: 'pending@demo.com', role: 'affiliate', status: 'pending',

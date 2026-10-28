@@ -61,7 +61,7 @@ describe('batch creation', () => {
 
     const empty = await request(app).post('/api/admin/payouts').set(actors.financeAuth);
     expect(empty.status).toBe(409);
-    expect(empty.body.error.details).toEqual({ skippedMissingDetails: 1, skippedBelowMinimum: 1 });
+    expect(empty.body.error.details).toEqual({ skippedMissingDetails: 1, skippedBelowMinimum: 1, skippedOnHold: 0 });
 
     await addUpi(app, noDetailsAuth, 'later@okaxis');
     const created = await request(app).post('/api/admin/payouts').set(actors.financeAuth);
