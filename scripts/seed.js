@@ -109,7 +109,7 @@ async function seed() {
   await approveCommissions(paidIds, opsActor);
   const { batch } = await payoutService.createBatch(financeActor);
   await payoutService.exportBatchCsv(batch._id, financeActor, ctx);
-  await payoutService.confirmBatch(batch._id, { paymentReference: 'UTR998877', failedItems: [] }, financeActor);
+  await payoutService.confirmBatch(batch._id, { paymentReference: 'UTR998877', failedItems: [], heldPaidAcknowledged: [] }, financeActor);
 
   // Open work for the demo: one of each remaining status.
   const approvedId = await sale(affiliate, 'SEED-1003', 600000, opsActor);
