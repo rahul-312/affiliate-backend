@@ -131,7 +131,7 @@ The server **won't start** if a required variable is missing or still says `chan
 | `CORS_ORIGINS` | | Dashboard URL(s) allowed to call the API, comma-separated. Locally: `http://localhost:3000` |
 | `DEMO_MODE` | | `true` turns on the dashboard's "Simulate sale" button. Turn it off in a real deployment |
 | `REFERRAL_BASE_URL` | | Start of each affiliate's referral link; the code is added to the end. Default: `https://shop.example.com/?ref=` |
-| `TRUST_PROXY` | | Number of proxies in front of the server (`1` on Render). Needed for per-IP rate limits |
+| `TRUST_PROXY` | | Number of proxies in front of the server (`1` on Vercel). Needed for per-IP rate limits |
 | `PORT`, `JWT_EXPIRES_IN`, `LOG_LEVEL`, `AUTH_RATE_LIMIT_MAX`, `API_RATE_LIMIT_MAX` | | Optional. The defaults in `.env.example` are fine |
 
 ---
@@ -149,29 +149,52 @@ The server **won't start** if a required variable is missing or still says `chan
 
 ---
 
-## Deploying to Render + Atlas
+## Deploying to Vercel
 
-1. Create a free Atlas cluster. Under **Network Access**, allow `0.0.0.0/0` (fine for a demo).
-2. On Render, choose **New → Blueprint** and select this repo. Render reads `render.yaml` and generates `JWT_SECRET` and `CONVERSION_API_KEY` for you.
-3. Fill in the three remaining values in the Render dashboard:
-   - `MONGODB_URI`: your Atlas connection string
-   - `PAYOUT_DETAILS_KEY`: the value from `npm run gen:secrets`
-   - `CORS_ORIGINS`: your deployed dashboard URL, for example `https://affiliate-frontend.vercel.app`
-4. Seed the production database once, from your computer:
+The backend runs on Vercel as a serverless function (`api/index.js`, routed by `vercel.json`). The database is MongoDB Atlas, added from Vercel's Storage marketplace.
 
-   ```bash
-   # Git Bash / macOS / Linux
-   MONGODB_URI="<atlas connection string>" npm run seed -- --allow-production
-   ```
+### Step 1: Import the project
 
-   ```powershell
-   # PowerShell
-   $env:MONGODB_URI="<atlas connection string>"; npm run seed -- --allow-production
-   ```
+On [vercel.com](https://vercel.com), choose **Add New → Project** and import this repo. Leave **Framework Preset** as **Other**.
 
-5. Open `https://<your-service>.onrender.com/api/health` and check that it returns `{"status":"ok","db":"up"}`.
+Before clicking **Deploy**, open **Environment Variables** and add:
 
-Render's free tier sleeps when idle, so **the first request can take about 30 seconds**.
+| Name | Value |
+| --- | --- |
+| `NODE_ENV` | `production` |
+| `JWT_SECRET`, `CONVERSION_API_KEY`, `PAYOUT_DETAILS_KEY` | New values from `npm run gen:secrets` (don't reuse your local ones) |
+| `DEMO_MODE` | `true` |
+| `TRUST_PROXY` | `1` |
+
+Click **Deploy**. The first deploy answers `503` until the database is added in step 2.
+
+### Step 2: Add the database
+
+1. In the project, open **Storage → Create Database → MongoDB Atlas** and follow the prompts (the free tier is enough).
+2. Connect it to this project. Vercel adds the `MONGODB_URI` environment variable for you.
+3. Open **Deployments**, click **⋯** on the latest one, and choose **Redeploy**.
+
+### Step 3: Check it works
+
+Open `https://<your-backend>.vercel.app/api/health`. You should see `{"status":"ok","db":"up"}`.
+
+### Step 4: Load the demo data
+
+Copy `MONGODB_URI` from **Settings → Environment Variables**, then run this from your computer:
+
+```powershell
+# PowerShell
+$env:MONGODB_URI="<the MONGODB_URI value>"; npm run seed -- --allow-production
+```
+
+```bash
+# Git Bash / macOS / Linux
+MONGODB_URI="<the MONGODB_URI value>" npm run seed -- --allow-production
+```
+
+### Step 5: Allow the dashboard
+
+After the [dashboard](https://github.com/rahul-312/affiliate-frontend) is deployed, add its URL as `CORS_ORIGINS` (for example `https://affiliate-frontend.vercel.app`) and redeploy the backend.
 
 ---
 
@@ -250,6 +273,7 @@ Amounts are in rupees with two decimals. Cells starting with `= + - @` are escap
 | **Only one open payout batch at a time** | Nobody can be paid twice by two overlapping batches | Finance must finish or cancel a batch before starting the next |
 | **CSV + manual confirmation instead of a gateway** | Works with any bank today, no gateway contract needed | Finance uploads the file and types in the payment reference by hand |
 | **Static API key for the store's sales webhook** | Simple for the store to set up | Weaker than a signed webhook if the key leaks |
+| **Hosted on Vercel as a serverless function** | Free, nothing to keep running, and the database is added from the same dashboard | Rate limits are counted per instance, so they're looser than on one server |
 | **MongoDB replica set required** | Transactions keep sales, commissions and payouts consistent | Local setup needs one extra command |
 
 ## What we'd add with more time
@@ -268,6 +292,7 @@ Amounts are in rupees with two decimals. Cells starting with `= + - @` are escap
 ## Project layout
 
 ```text
+api/index.js             Vercel entry point (connects once, then reuses the app)
 src/
   app.js                 Builds the Express app (used by server.js and the tests)
   server.js              Checks config, connects to the database, starts listening
