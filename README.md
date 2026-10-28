@@ -78,7 +78,7 @@ cp .env.example .env
 npm run gen:secrets      # prints JWT_SECRET, CONVERSION_API_KEY and PAYOUT_DETAILS_KEY: paste them into .env
 npm run seed             # resets the DB to the demo state below
 npm run dev              # http://localhost:4000/api
-npm test                 # 120 tests, in-memory MongoDB replica set (no setup needed)
+npm test                 # 125 tests, in-memory MongoDB replica set (no setup needed)
 npm run lint
 ```
 
@@ -140,7 +140,7 @@ Base path `/api`. Errors are always `{ "error": { "code", "message", "details?" 
 | GET | `/me` | any | Current user (payout details masked) |
 | GET | `/me/summary` | affiliate | Balances in paise + `needsPayoutDetails` / `belowMinimum` |
 | PUT | `/me/payout-method` | active affiliate | UPI or bank (validated UPI/IFSC), stored encrypted |
-| POST | `/me/pause` · `/me/resume` | affiliate | Pause your own account (optional `{ reason }`) and resume it; cannot lift a deactivation made by ops |
+| POST | `/me/pause` · `/me/resume` | affiliate | Pause your own account (optional `{ reason }`) and resume it; cannot lift a deactivation made by ops. 20 changes an hour per user |
 | GET | `/me/commissions`, `/me/payouts` | affiliate | Own commissions, own successful payouts with reference |
 | POST | `/conversions` | `x-api-key` | Store webhook: `201` new, `200` identical retry, `409` conflicting retry |
 | POST | `/admin/demo/simulate-sale` | ops, `DEMO_MODE` | Same pipeline as the webhook |
@@ -148,7 +148,7 @@ Base path `/api`. Errors are always `{ "error": { "code", "message", "details?" 
 | GET | `/admin/affiliates?status=` | ops, finance | List (masked details) |
 | POST | `/admin/affiliates/:id/approve` · `/reject` | ops | Approve takes an optional `{ rateBps }` (1%–50%, defaults to the program rate). Reject requires `{ reason }` |
 | PATCH | `/admin/affiliates/:id/rate` | ops | `{ rateBps }`: change an active affiliate's rate for future sales; audited |
-| POST | `/admin/affiliates/:id/deactivate` · `/reactivate` | ops | Deactivate requires `{ reason }`: the link goes off and new sales are refused; earned commissions stay payable |
+| POST | `/admin/affiliates/:id/deactivate` · `/reactivate` | ops | Deactivate requires `{ reason }` (also takes over a self-pause): the link goes off, new sales are refused and payouts are held. Reactivate takes an optional `{ note }` |
 | GET | `/admin/commissions?status=` | ops, finance | Queue |
 | POST | `/admin/commissions/approve` · `/reject` | ops | `{ ids }` / `{ ids, reason }`. All-or-nothing |
 | POST / GET | `/admin/payouts` | finance | Create batch (transaction) / list |
@@ -190,7 +190,7 @@ Amounts are rupees with two decimals, converted from paise only at export. Cells
 - **Payload-aware idempotency for sales.** The same `orderId` with the same payload is a safe retry (`200`). The same `orderId` with a different amount or code is a conflict (`409`, naming the differing fields), never silently treated as a duplicate. Conversion + commission + audit entry are written in one transaction. A concurrent duplicate is resolved outside the aborted transaction.
 - **CSV + manual confirmation instead of a payment gateway.** This is honest for v1: finance can operate it today, and the reference + per-item failure model maps cleanly onto a gateway later.
 - **Commission rate per affiliate, set at approval.** Ops picks the rate when approving (prefilled with the program's standard rate) and can change it later from the dashboard. A change applies to new sales only, because each commission keeps the rate it was created with, and every change is in the audit log. The app shows the standard rate as a guide and each affiliate's own rate once approved.
-- **Pausing without losing history.** Ops can deactivate an affiliate (reason required), and an affiliate can pause themselves from the app and resume later. While paused the link is off and new sales are refused, but commissions already earned stay payable. Only ops can lift a deactivation ops made. Rate and referral code are kept.
+- **Pausing without losing history.** An affiliate can pause themselves from the app and resume later: the link is off and new sales are refused, but what they already earned is still paid and they can keep their payout details up to date. Ops can deactivate an affiliate (reason required), including taking over a self-pause: then **payouts are held** (skipped by batch creation and listed as on hold) and payout details are locked until ops reactivates them, which suits a fraud review. Rate and referral code are kept either way. Affiliates approved before per-affiliate rates can be given a stored rate with `npm run backfill:rates`.
 - **Referral link activates only on approval.** Sign-up stays frictionless, while unvetted accounts can't earn: conversions for non-active affiliates are refused.
 - **Payout details after approval, not at sign-up.** A shorter form converts better, and sensitive data is only requested once there's a reason to give it.
 - **Security posture** (beyond the plan's baseline):
@@ -214,7 +214,7 @@ Amounts are rupees with two decimals, converted from paise only at export. Cells
 5. **Click tracking and attribution windows**, a per-affiliate conversion funnel, and **fraud signals** (self-referral, velocity, coupon sites).
 6. **Notifications**: push/email on approval, commission approved and payout sent.
 7. **Session hardening**: httpOnly-cookie sessions for the dashboard, refresh-token rotation, staff 2FA, and key rotation for `PAYOUT_DETAILS_KEY` (the ciphertext is already versioned `v1.`).
-8. Editable program settings in the dashboard, automatic tiered rates (by volume) and per-product rates on top of today's per-affiliate rate, and an audit-log viewer.
+8. A separate internal note for ops on deactivations (today the reason is shown to the affiliate, like a rejection reason). Editable program settings in the dashboard, automatic tiered rates (by volume) and per-product rates on top of today's per-affiliate rate, and an audit-log viewer.
 9. **Snapshot payout details on the batch.** The CSV currently uses each affiliate's payout details as they are at export time, so an edit between batch creation and export changes where the money goes. Freezing them at batch creation (or flagging the change to finance) makes the export match what was reviewed.
 
 ## Project layout

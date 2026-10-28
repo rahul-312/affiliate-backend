@@ -8,6 +8,9 @@ const { getProgramSettings } = require('../program/program.service');
 
 const formatRate = (bps) => `${bps / 100}%`;
 
+/** Statuses an approved affiliate can be in. */
+const APPROVED_STATUSES = Object.freeze(['active', 'deactivated']);
+
 async function listAffiliates({ status, page, limit }) {
   const filter = { role: 'affiliate', ...(status && { status }) };
   const [items, total] = await Promise.all([
@@ -55,29 +58,33 @@ const approveAffiliate = (id, rateBps, actor) => decideApplication(id, { to: 'ac
 const rejectAffiliate = (id, reason, actor) => decideApplication(id, { to: 'rejected', actor, reason });
 
 /**
- * Changes an active affiliate's rate. Applies to future sales only: every
- * existing commission keeps the rate it snapshotted when it was created.
+ * Changes an approved affiliate's rate (active or deactivated). Applies to
+ * future sales only: every existing commission keeps the rate it snapshotted
+ * when it was created. Setting the current rate again changes nothing.
  */
 async function setCommissionRate(affiliateId, rateBps, actor) {
   return runInTransaction(async (session) => {
-    const before = await User.findOneAndUpdate(
-      { _id: affiliateId, role: 'affiliate', status: 'active' },
-      { $set: { commissionRateBps: rateBps } },
-      { new: false, session },
-    );
-    if (!before) {
-      const current = await User.findOne({ _id: affiliateId, role: 'affiliate' }, { status: 1 }).session(session).lean();
-      if (!current) throw notFound('Affiliate not found');
-      throw conflict(`Only active affiliates have a rate to change (this one is ${current.status})`, { status: current.status }, 'INVALID_TRANSITION');
+    const current = await User.findOne({ _id: affiliateId, role: 'affiliate' }).session(session);
+    if (!current) throw notFound('Affiliate not found');
+    if (!APPROVED_STATUSES.includes(current.status)) {
+      throw conflict(`Only approved affiliates have a rate to change (this one is ${current.status})`, { status: current.status }, 'INVALID_TRANSITION');
     }
+    const previous = current.commissionRateBps ?? (await getProgramSettings(session)).rateBps;
+    if (previous === rateBps && current.commissionRateBps !== undefined) return current;
 
-    const previous = before.commissionRateBps ?? (await getProgramSettings(session)).rateBps;
+    const updated = await User.findOneAndUpdate(
+      { _id: affiliateId, role: 'affiliate', status: current.status },
+      { $set: { commissionRateBps: rateBps } },
+      { new: true, session },
+    );
+    if (!updated) throw conflict('This affiliate changed while saving. Please try again.', undefined, 'INVALID_TRANSITION');
+
     await recordAudit(
       [
         {
           actor,
           entity: 'User',
-          entityId: before._id,
+          entityId: updated._id,
           action: 'rate_change',
           from: String(previous),
           to: String(rateBps),
@@ -86,37 +93,39 @@ async function setCommissionRate(affiliateId, rateBps, actor) {
       ],
       session,
     );
-    return User.findById(before._id).session(session);
+    return updated;
   });
 }
 
 /**
  * Pauses or restores an approved affiliate. While deactivated the referral
- * link is off and new sales are refused; commissions already earned stay
- * payable. Reactivating keeps the affiliate's rate and referral code.
+ * link is off and new sales are refused. Commissions already earned stay
+ * payable after a self-pause; after an ops deactivation they are held (see
+ * payout.rules). Reactivating keeps the affiliate's rate and referral code.
  *
- * Ops can pause anyone (reason required) and restore anyone. An affiliate can
- * pause themselves (reason optional) and resume only a pause they started.
+ * - An affiliate can pause themselves (reason optional) and resume only a pause they started.
+ * - Ops can deactivate an active affiliate or take over a self-pause (reason required), and
+ *   can reactivate anyone, optionally with a note.
  */
 async function setActive(affiliateId, { active, reason, actor }) {
-  const from = active ? 'deactivated' : 'active';
-  const to = active ? 'active' : 'deactivated';
   const bySelf = actor.role === 'affiliate';
   return runInTransaction(async (session) => {
-    const filter = { _id: affiliateId, role: 'affiliate', status: from, ...(active && bySelf && { deactivatedByRole: 'affiliate' }) };
-    const update = active
-      ? { $set: { status: to }, $unset: { deactivationReason: 1, deactivatedBy: 1, deactivatedByRole: 1, deactivatedAt: 1 } }
-      : {
-          $set: {
-            status: to,
-            deactivationReason: reason,
-            deactivatedBy: actor.id,
-            deactivatedByRole: bySelf ? 'affiliate' : 'ops',
-            deactivatedAt: new Date(),
-          },
-        };
-    const updated = await User.findOneAndUpdate(filter, update, { new: true, session });
-    if (!updated) {
+    let filter;
+    let update;
+    if (active) {
+      filter = { _id: affiliateId, role: 'affiliate', status: 'deactivated', ...(bySelf && { deactivatedByRole: 'affiliate' }) };
+      update = { $set: { status: 'active' }, $unset: { deactivationReason: 1, deactivatedBy: 1, deactivatedByRole: 1, deactivatedAt: 1 } };
+    } else {
+      // Ops may also convert a self-pause into an ops deactivation, so the affiliate can no longer resume it.
+      const pausable = bySelf ? [{ status: 'active' }] : [{ status: 'active' }, { status: 'deactivated', deactivatedByRole: 'affiliate' }];
+      filter = { _id: affiliateId, role: 'affiliate', $or: pausable };
+      const set = { status: 'deactivated', deactivatedBy: actor.id, deactivatedByRole: bySelf ? 'affiliate' : 'ops', deactivatedAt: new Date() };
+      // Taking over a self-pause replaces the affiliate's own reason; a pause without one clears any stale reason.
+      update = reason ? { $set: { ...set, deactivationReason: reason } } : { $set: set, $unset: { deactivationReason: 1 } };
+    }
+
+    const before = await User.findOneAndUpdate(filter, update, { new: false, session });
+    if (!before) {
       const current = await User.findOne({ _id: affiliateId, role: 'affiliate' }, { status: 1, deactivatedByRole: 1 })
         .session(session)
         .lean();
@@ -125,16 +134,19 @@ async function setActive(affiliateId, { active, reason, actor }) {
         throw forbidden('Your account was paused by the affiliate team. Please contact them to reactivate it.');
       }
       const verb = active ? (bySelf ? 'resumed' : 'reactivated') : bySelf ? 'paused' : 'deactivated';
-      throw conflict(`Only ${from} accounts can be ${verb} (this one is ${current.status})`, { status: current.status }, 'INVALID_TRANSITION');
+      throw conflict(`This account can't be ${verb} (it is ${current.status})`, { status: current.status }, 'INVALID_TRANSITION');
     }
 
     const action = active ? (bySelf ? 'resume' : 'reactivate') : bySelf ? 'pause' : 'deactivate';
-    await recordAudit([{ actor, entity: 'User', entityId: updated._id, action, from, to, note: reason }], session);
-    return updated;
+    await recordAudit(
+      [{ actor, entity: 'User', entityId: before._id, action, from: before.status, to: active ? 'active' : 'deactivated', note: reason }],
+      session,
+    );
+    return User.findById(before._id).session(session);
   });
 }
 
 const deactivateAffiliate = (id, reason, actor) => setActive(id, { active: false, reason, actor });
-const reactivateAffiliate = (id, actor) => setActive(id, { active: true, actor });
+const reactivateAffiliate = (id, note, actor) => setActive(id, { active: true, reason: note, actor });
 
 module.exports = { listAffiliates, approveAffiliate, rejectAffiliate, setCommissionRate, deactivateAffiliate, reactivateAffiliate };

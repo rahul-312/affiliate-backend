@@ -3,7 +3,7 @@
 const request = require('supertest');
 const { Commission, AuditLog, User } = require('../../src/models');
 const { connectTestDb, disconnectTestDb, resetDb, buildApp, createUser, createActors, authFor } = require('../helpers/harness');
-const { postConversion, nextOrderId } = require('../helpers/flows');
+const { postConversion, nextOrderId, createApprovedCommission, addUpi } = require('../helpers/flows');
 
 const { app } = buildApp();
 let actors;
@@ -258,5 +258,88 @@ describe('pausing and deactivating an affiliate', () => {
     await admin(active, 'deactivate', { reason: 'Nor can affiliates' }, await authFor(app, active)).expect(403);
     await self(actors.opsAuth, 'pause').expect(403);
     await self(await authFor(app, active), 'pause', { role: 'ops' }).expect(400);
+  });
+});
+
+describe('pausing: payouts, payout details and takeovers', () => {
+  const admin = (affiliate, action, body, auth = actors.opsAuth) =>
+    request(app).post(`/api/admin/affiliates/${affiliate._id}/${action}`).set(auth).send(body);
+  const self = (auth, action, body = {}) => request(app).post(`/api/me/${action}`).set(auth).send(body);
+
+  /** An active affiliate with UPI details and ₹500 approved, ready for the next payout. */
+  async function payable() {
+    const affiliate = await createUser();
+    const auth = await authFor(app, affiliate);
+    await addUpi(app, auth);
+    await createApprovedCommission(app, actors.opsAuth, affiliate);
+    return { affiliate, auth };
+  }
+
+  it('lets ops take over a self-pause, after which the affiliate cannot resume', async () => {
+    const affiliate = await createUser();
+    const auth = await authFor(app, affiliate);
+    await self(auth, 'pause', { reason: 'Busy month' }).expect(200);
+
+    const res = await admin(affiliate, 'deactivate', { reason: 'Under review' });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: 'deactivated', deactivatedBy: 'ops', deactivationReason: 'Under review' });
+    expect((await self(auth, 'resume')).status).toBe(403);
+    expect(await AuditLog.findOne({ entityId: affiliate._id, action: 'deactivate' }).lean()).toMatchObject({ from: 'deactivated' });
+
+    // An ops deactivation can't be "taken over" again or paused by the affiliate.
+    expect((await admin(affiliate, 'deactivate', { reason: 'Again' })).status).toBe(409);
+    expect((await self(auth, 'pause')).status).toBe(409);
+  });
+
+  it('holds payouts while ops has deactivated an affiliate, and releases them on reactivation', async () => {
+    const held = await payable();
+    const paused = await payable();
+    await admin(held.affiliate, 'deactivate', { reason: 'Fraud review' }).expect(200);
+    await self(paused.auth, 'pause').expect(200);
+
+    const summary = (await request(app).get('/api/me/summary').set(held.auth)).body;
+    expect(summary).toMatchObject({ approvedPaise: 50000, availableForNextPayoutPaise: 0, payoutsOnHold: true });
+
+    const batch = await request(app).post('/api/admin/payouts').set(actors.financeAuth);
+    expect(batch.status).toBe(201);
+    const paidIds = batch.body.batch.items.map((i) => i.affiliate.id);
+    expect(paidIds).toEqual([String(paused.affiliate._id)]); // self-paused is still paid
+    expect(batch.body.skipped.onHold.map((e) => e.affiliateId)).toEqual([String(held.affiliate._id)]);
+
+    await request(app).post(`/api/admin/payouts/${batch.body.batch.id}/cancel`).set(actors.financeAuth).send({}).expect(200);
+    await admin(held.affiliate, 'reactivate', { note: 'Review cleared' }).expect(200);
+    expect(await AuditLog.findOne({ entityId: held.affiliate._id, action: 'reactivate' }).lean()).toMatchObject({ note: 'Review cleared' });
+    const next = await request(app).post('/api/admin/payouts').set(actors.financeAuth).expect(201);
+    expect(next.body.batch.items).toHaveLength(2);
+  });
+
+  it('lets a self-paused affiliate fix payout details, but not one deactivated by ops', async () => {
+    const affiliate = await createUser();
+    const auth = await authFor(app, affiliate);
+    await self(auth, 'pause').expect(200);
+    await request(app).put('/api/me/payout-method').set(auth).send({ type: 'upi', upiId: 'fixed@okhdfc' }).expect(200);
+
+    await admin(affiliate, 'deactivate', { reason: 'Under review' }).expect(200);
+    const blocked = await request(app).put('/api/me/payout-method').set(auth).send({ type: 'upi', upiId: 'other@okhdfc' });
+    expect(blocked.status).toBe(403);
+    expect(blocked.body.error.message).toMatch(/paused by the affiliate team/);
+  });
+
+  it('lets ops change a deactivated affiliate’s rate, and ignores setting the same rate', async () => {
+    const affiliate = await createUser({ commissionRateBps: 1000 });
+    await admin(affiliate, 'deactivate', { reason: 'Renegotiating terms' }).expect(200);
+    const patch = (rateBps) => request(app).patch(`/api/admin/affiliates/${affiliate._id}/rate`).set(actors.opsAuth).send({ rateBps });
+
+    expect((await patch(1000)).status).toBe(200);
+    expect(await AuditLog.countDocuments({ entityId: affiliate._id, action: 'rate_change' })).toBe(0);
+    expect((await patch(800)).body.commissionRateBps).toBe(800);
+    expect(await AuditLog.countDocuments({ entityId: affiliate._id, action: 'rate_change' })).toBe(1);
+  });
+
+  it('rate-limits pause and resume per user', async () => {
+    const affiliate = await createUser();
+    const auth = await authFor(app, affiliate);
+    for (let i = 0; i < 20; i += 1) await self(auth, i % 2 === 0 ? 'pause' : 'resume').expect(200);
+    expect((await self(auth, 'pause')).status).toBe(429);
   });
 });

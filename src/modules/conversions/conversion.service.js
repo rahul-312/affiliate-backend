@@ -37,8 +37,8 @@ async function resolveExistingOrder(existing, input) {
   return { conversion: existing, commission, created: false };
 }
 
-async function findEligibleAffiliate(referralCode) {
-  const affiliate = await User.findOne({ referralCode, role: 'affiliate' }).lean();
+async function findEligibleAffiliate(referralCode, session) {
+  const affiliate = await User.findOne({ referralCode, role: 'affiliate' }).session(session ?? null).lean();
   if (!affiliate || affiliate.status !== 'active') {
     throw unprocessable('This referral code is not active, so the sale cannot earn a commission');
   }
@@ -64,10 +64,13 @@ async function recordConversion(input, { actor, source }, testHooks = {}) {
   const existing = await Conversion.findOne({ orderId: input.orderId });
   if (existing) return resolveExistingOrder(existing, input);
 
-  const affiliate = await findEligibleAffiliate(input.referralCode);
+  // Fail fast outside the transaction for an ineligible code...
+  await findEligibleAffiliate(input.referralCode);
 
   try {
     return await runInTransaction(async (session) => {
+      // ...then re-read inside it, so the status and rate used are the ones committed with the sale.
+      const affiliate = await findEligibleAffiliate(input.referralCode, session);
       // The affiliate's own rate, set at approval; affiliates approved before per-affiliate rates fall back to the program rate.
       const rateBps = affiliate.commissionRateBps ?? (await getProgramSettings(session)).rateBps;
       const conversion = await new Conversion({

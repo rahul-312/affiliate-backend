@@ -45,11 +45,11 @@ async function createBatch(actor) {
       });
       await batch.save({ session });
 
-      const { eligible, missingDetails, belowMinimum } = await computePayoutEligibility(session);
+      const { eligible, onHold, missingDetails, belowMinimum } = await computePayoutEligibility(session);
       if (eligible.length === 0) {
         throw conflict(
           'No commissions are ready for payout',
-          { skippedMissingDetails: missingDetails.length, skippedBelowMinimum: belowMinimum.length },
+          { skippedMissingDetails: missingDetails.length, skippedBelowMinimum: belowMinimum.length, skippedOnHold: onHold.length },
           'NOTHING_TO_PAY',
         );
       }
@@ -89,7 +89,11 @@ async function createBatch(actor) {
 
       return {
         batch,
-        skipped: { missingDetails: missingDetails.map(publicEntry), belowMinimum: belowMinimum.map(publicEntry) },
+        skipped: {
+          missingDetails: missingDetails.map(publicEntry),
+          belowMinimum: belowMinimum.map(publicEntry),
+          onHold: onHold.map(publicEntry),
+        },
       };
     });
   } catch (err) {

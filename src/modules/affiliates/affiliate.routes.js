@@ -15,7 +15,8 @@ const rejectBody = z.strictObject({ reason });
 // Omitted rate → the program's standard rate at the moment of approval.
 const approveBody = z.strictObject({ rateBps: rateBps.optional() });
 const rateBody = z.strictObject({ rateBps });
-const emptyBody = z.strictObject({});
+// An optional note for the audit log, e.g. why the review ended.
+const reactivateBody = z.strictObject({ note: z.string().trim().max(500).optional() });
 
 function createAffiliateRouter({ config }) {
   const router = Router();
@@ -62,8 +63,12 @@ function createAffiliateRouter({ config }) {
     res.json(toJson(user));
   });
 
-  router.post('/:id/reactivate', requireRole('ops'), validate({ params: idParams, body: emptyBody }), async (req, res) => {
-    const user = await affiliateService.reactivateAffiliate(req.validated.params.id, actorFromUser(req.user));
+  router.post('/:id/reactivate', requireRole('ops'), validate({ params: idParams, body: reactivateBody }), async (req, res) => {
+    const user = await affiliateService.reactivateAffiliate(
+      req.validated.params.id,
+      req.validated.body.note || undefined,
+      actorFromUser(req.user),
+    );
     res.json(toJson(user));
   });
 

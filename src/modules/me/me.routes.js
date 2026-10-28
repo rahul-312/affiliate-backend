@@ -8,12 +8,15 @@ const { payoutMethodBody, commissionsQuery, pauseBody, emptyBody } = require('./
 const meService = require('./me.service');
 const affiliateService = require('../affiliates/affiliate.service');
 const { actorFromUser } = require('../audit/audit.service');
+const { createAccountActionLimiter } = require('../../middleware/rateLimit');
 
 /** Routes about the signed-in user. Affiliates can only ever reach their own data. */
 function createMeRouter(ctx) {
   const router = Router();
   const { config } = ctx;
   const toJson = (user) => serializeUser(user, { referralBaseUrl: config.referralBaseUrl });
+  // Pausing is a deliberate, occasional action; cap it so toggling can't flood the audit log.
+  const accountActionLimiter = createAccountActionLimiter();
 
   router.get('/', (req, res) => {
     res.json(toJson(req.user));
@@ -38,13 +41,13 @@ function createMeRouter(ctx) {
   });
 
   // Affiliates can opt out for a while and come back; an ops deactivation can only be lifted by ops.
-  router.post('/pause', requireRole('affiliate'), validate({ body: pauseBody }), async (req, res) => {
+  router.post('/pause', requireRole('affiliate'), accountActionLimiter, validate({ body: pauseBody }), async (req, res) => {
     const user = await affiliateService.deactivateAffiliate(req.user._id, req.validated.body.reason || undefined, actorFromUser(req.user));
     res.json(toJson(user));
   });
 
-  router.post('/resume', requireRole('affiliate'), validate({ body: emptyBody }), async (req, res) => {
-    const user = await affiliateService.reactivateAffiliate(req.user._id, actorFromUser(req.user));
+  router.post('/resume', requireRole('affiliate'), accountActionLimiter, validate({ body: emptyBody }), async (req, res) => {
+    const user = await affiliateService.reactivateAffiliate(req.user._id, undefined, actorFromUser(req.user));
     res.json(toJson(user));
   });
 
