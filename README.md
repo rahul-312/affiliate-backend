@@ -1,236 +1,284 @@
 # Affiliate Hub: backend
 
-The single API behind the Affiliate Hub v1: affiliate sign-up and approval, commission tracking and release, and payouts for the finance team. This README is the main one for the whole project. The other two repos link here.
+The API for Affiliate Hub. It handles affiliate sign-up and approval, commission tracking, and payouts. The dashboard and the mobile app both talk to this API, and all business rules live here.
 
-| Repo | What it is | Stack |
+Built with Node.js 22, Express 5, MongoDB (Mongoose), zod and JWT.
+
+**Related repos:** [affiliate-frontend](https://github.com/rahul-312/affiliate-frontend) (dashboard for ops and finance) · [affiliate-mobile](https://github.com/rahul-312/affiliate-mobile) (Android app for affiliates)
+
+---
+
+## Before you start
+
+Install these first:
+
+| Tool | Version | Check it with |
 | --- | --- | --- |
-| **affiliate-backend** (this repo) | The one API and every business rule | Node.js 22, Express 5, MongoDB (Mongoose), zod, JWT |
-| [affiliate-frontend](https://github.com/rahul-312/affiliate-frontend) | Internal tool for the ops (affiliate) and finance teams | Next.js 16 (App Router), TypeScript |
-| [affiliate-mobile](https://github.com/rahul-312/affiliate-mobile) | Affiliate-facing app, shipped as an Android APK | React Native, Expo SDK 58, Expo Router |
+| Node.js | 22 (anything ≥ 20.11 works) | `node -v` |
+| MongoDB | 7, **running as a replica set** (see step 2) | |
+
+You need a replica set because the API uses MongoDB transactions. You can get one in either of two ways:
+
+- **Docker** (easiest locally): install [Docker Desktop](https://www.docker.com/products/docker-desktop/) and make sure it is running.
+- **MongoDB Atlas** (free cloud database): every Atlas cluster is already a replica set, so you don't need any extra setup.
 
 ---
 
-## 1. Overview
+## Setup
 
-**The problem.** The program needs more affiliate sign-ups. The affiliate team can't reliably track and release commissions, and finance struggles to pay people.
+Run every command from inside the `affiliate-backend` folder.
 
-**The v1.** One commission lifecycle, working end to end across all three teams:
-
-```
-Landing pitch ─► sign up ─► "application received" ─► ops approves ─► referral link goes live
-  (mobile)       (mobile)        (mobile)              (dashboard)          (mobile)
-                                                                               │
-                                                                               ▼
- mobile shows "paid" ◄─ finance confirms ◄─ finance batches ◄─ ops approves ◄─ sale recorded
-                         with reference      + exports CSV      commission      (pending)
-```
-
-**Acceptance criterion.** A reviewer installs the APK and registers an affiliate. They approve that affiliate in the dashboard, simulate a sale and approve the commission. They then create and export a payout, confirm the payment with a reference, and see the resulting status in the app. Everything runs against one deployed backend, with no manual database edits.
-
-### Architecture
-
-```
- ┌─────────────────────┐   HTTPS / JSON, Authorization: Bearer <JWT>
- │ affiliate-mobile    │──────────┐
- │ Expo → Android APK  │          ▼
- └─────────────────────┘   ┌──────────────────────┐   Mongoose   ┌───────────────────┐
- External store ──────────►│ affiliate-backend    │◄────────────►│ MongoDB           │
- (x-api-key webhook)       │ Express: ONE API     │              │ replica set       │
-                           └──────────────────────┘              └───────────────────┘
- ┌─────────────────────┐          ▲
- │ affiliate-frontend │──────────┘
- │ Next.js (ops+fin)   │
- └─────────────────────┘
-```
-
-The backend tells callers apart by the **role** stored on the user (`affiliate`, `ops` or `finance`), not by running separate servers. The external store is authenticated with a server-side API key.
-
----
-
-## 2. How the repos connect
-
-| | Base URL (local) | Env var that points at the backend | Who calls the backend |
-| --- | --- | --- | --- |
-| Backend | `http://localhost:4000/api` | n/a | n/a |
-| Dashboard | `http://localhost:3000` | `NEXT_PUBLIC_API_URL=http://localhost:4000/api` | the browser (so the backend's `CORS_ORIGINS` must list the dashboard origin) |
-| Mobile | Expo dev server / APK | `EXPO_PUBLIC_API_URL=http://10.0.2.2:4000/api` (emulator) or the deployed `https://…/api` (APK) | the phone (CORS doesn't apply to native apps) |
-
-**Startup order**
-
-1. **MongoDB as a replica set.** Transactions need one. Atlas clusters already are one. Locally:
-   ```bash
-   docker run -d -p 27017:27017 --name mongo mongo:7 --replSet rs0
-   docker exec mongo mongosh --eval "rs.initiate()"
-   ```
-2. **Backend** (this repo): see below, then check `GET http://localhost:4000/api/health` → `{"status":"ok","db":"up"}`.
-3. **Dashboard**: `npm install && cp .env.example .env.local && npm run dev` → http://localhost:3000.
-4. **Mobile**: `npm install && cp .env.example .env && npx expo start`, or install the APK.
-
----
-
-## 3. Install, configure, run (backend)
-
-Requires Node.js ≥ 20.11 (22 recommended, see `.nvmrc`).
+### Step 1: Install dependencies
 
 ```bash
 npm install
-cp .env.example .env
-npm run gen:secrets      # prints JWT_SECRET, CONVERSION_API_KEY and PAYOUT_DETAILS_KEY: paste them into .env
-npm run seed             # resets the DB to the demo state below
-npm run dev              # http://localhost:4000/api
-npm test                 # 127 tests, in-memory MongoDB replica set (no setup needed)
-npm run lint
 ```
 
-The server **refuses to start** if `MONGODB_URI`, `JWT_SECRET`, `CONVERSION_API_KEY` or `PAYOUT_DETAILS_KEY` is missing, or if a secret is still a `change-me` placeholder. It also refuses a `JWT_SECRET` under 32 characters and non-https CORS origins in production. The error names the offending variable.
+### Step 2: Start MongoDB as a replica set
 
-| Variable | Required | Purpose |
-| --- | --- | --- |
-| `MONGODB_URI` | ✔ | Must point at a replica set (`?replicaSet=rs0` locally) |
-| `JWT_SECRET` | ✔ | ≥ 32 chars. Signs access tokens (HS256, issuer/audience pinned) |
-| `CONVERSION_API_KEY` | ✔ | Shared with the store calling `POST /api/conversions` |
-| `PAYOUT_DETAILS_KEY` | ✔ | 64 hex chars. AES-256-GCM key for bank/UPI details at rest |
-| `CORS_ORIGINS` | | Comma-separated dashboard origin(s) |
-| `DEMO_MODE` | | `true` enables `POST /api/admin/demo/simulate-sale` (ops only) |
-| `REFERRAL_BASE_URL` | | Prefix for shareable links (`…?ref=CODE`). Defaults to the placeholder `https://shop.example.com/?ref=`; in a real deployment this is the store's URL |
-| `TRUST_PROXY` | | Number of proxies in front (Render: `1`), used for per-IP rate limits |
-| `JWT_EXPIRES_IN`, `LOG_LEVEL`, `AUTH_RATE_LIMIT_MAX`, `API_RATE_LIMIT_MAX`, `PORT` | | Have sensible defaults |
+**With Docker**, run these two commands once:
 
-### Deploying (Render + Atlas)
+```bash
+docker run -d -p 27017:27017 --name mongo mongo:7 --replSet rs0
+docker exec mongo mongosh --eval "rs.initiate({_id:'rs0',members:[{_id:0,host:'localhost:27017'}]})"
+```
 
-`render.yaml` is a Render Blueprint. Create a free Atlas cluster and allow Render's egress IPs (or `0.0.0.0/0` for the demo). Create the Blueprint, then fill in `MONGODB_URI`, `PAYOUT_DETAILS_KEY` and `CORS_ORIGINS` (the Vercel dashboard URL). Seed once from your machine with the production URI: `MONGODB_URI=… npm run seed -- --allow-production`. Render's free tier sleeps, so **the first request can take ~30 s**. Both clients allow for that with a 45 s timeout and a "waking up" hint.
+The second command should print `{ ok: 1 }`. After a restart, start the database again with `docker start mongo`.
 
-### Demo accounts (password `demo1234` for all)
+**With Atlas**, create a free cluster, add a database user, and copy its connection string (`mongodb+srv://...`). Use it in step 3.
 
-| Role | Email | Seeded state |
-| --- | --- | --- |
-| Ops | `ops@demo.com` | |
-| Finance | `finance@demo.com` | |
-| Affiliate (active) | `affiliate@demo.com` | UPI saved. Commissions in every status, and one paid batch (`PB-0001`, ref `UTR998877`) |
-| Affiliate (no payout details) | `nodetails@demo.com` | ₹750 approved and waiting. Shows under "missing payout details" |
-| Affiliate (pending) | `pending@demo.com` | Awaiting approval |
+### Step 3: Create your `.env` file
 
-> `DEMO_MODE=true` stays on for the reviewer demo. In a real deployment it would be off, and sales would only arrive through the API-key webhook.
+```bash
+cp .env.example .env
+```
 
-### Walking the acceptance test
+Open `.env` and set `MONGODB_URI`:
 
-1. Install the APK and sign up. The app shows "application received" with the referral link greyed out.
-2. Dashboard as **ops** → Affiliates → approve. In the app, pull to refresh: the link is live, and Share opens the native share sheet.
-3. Dashboard as **ops** → Commissions → *Simulate sale* with the new code, ₹5,000. A ₹500.00 pending commission appears at 10%.
-4. Approve it. The app shows the banner "You've earned ₹500.00. Add payout details…". Finance sees the affiliate under "Owed but missing payout details".
-5. App → add a UPI ID. The banner disappears.
-6. Dashboard as **finance** → Payouts → *Create payout batch* → *Download CSV* → *Confirm payment* with `UTR123456`.
-7. The app shows the commission as paid, and Payouts lists the batch with its reference.
-8. Negative checks: re-send the same order ID and amount (nothing new is created). Send a different amount (`409`). Approve the paid commission again (`409`). Confirm the batch again (`409`).
+- Docker: leave the default, `mongodb://localhost:27017/affiliate?replicaSet=rs0`
+- Atlas: paste your connection string, with `/affiliate` as the database name
 
-The same flow is covered by the API tests. A shell version against a running server was used during development.
+### Step 4: Generate the secrets
+
+```bash
+npm run gen:secrets
+```
+
+This prints three lines: `JWT_SECRET`, `CONVERSION_API_KEY` and `PAYOUT_DETAILS_KEY`. Copy them into `.env` in place of the three `change-me` values.
+
+### Step 5: Load the demo data
+
+```bash
+npm run seed
+```
+
+This **wipes the database** and creates the demo accounts listed below. It ends with `Done. All demo accounts use the password "demo1234"`.
+
+### Step 6: Start the server
+
+```bash
+npm run dev
+```
+
+Open <http://localhost:4000/api/health> in your browser. You should see:
+
+```json
+{"status":"ok","db":"up"}
+```
+
+The backend is running. You can now set up the [dashboard](https://github.com/rahul-312/affiliate-frontend) or the [mobile app](https://github.com/rahul-312/affiliate-mobile).
 
 ---
 
-## 4. API
+## Demo accounts
 
-Base path `/api`. Errors are always `{ "error": { "code", "message", "details?" } }`.
+All accounts use the password **`demo1234`**.
 
-| Method | Route | Auth | Purpose |
+| Email | Role | What's already set up for it |
+| --- | --- | --- |
+| `ops@demo.com` | Ops | |
+| `finance@demo.com` | Finance | |
+| `affiliate@demo.com` | Affiliate (active) | UPI saved, commissions in every status, and one paid batch (`PB-0001`, ref `UTR998877`) |
+| `nodetails@demo.com` | Affiliate (active) | ₹750 approved but no payout details, so it shows under "missing payout details" |
+| `pending@demo.com` | Affiliate (pending) | Waiting for approval |
+
+---
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `npm run dev` | Starts the server on port 4000 and restarts it when you change a file |
+| `npm start` | Starts the server without auto-restart (used in production) |
+| `npm run seed` | Wipes the database and loads the demo data |
+| `npm run gen:secrets` | Prints fresh random secrets for `.env` |
+| `npm test` | Runs all tests. They use their own in-memory MongoDB, so you don't need a database running |
+| `npm run lint` | Checks code style |
+| `npm run backfill:rates` | One-off migration: gives affiliates approved before per-affiliate rates existed a stored rate |
+
+---
+
+## Environment variables
+
+The server **won't start** if a required variable is missing or still says `change-me`. The error message names the variable to fix.
+
+| Variable | Required | What it's for |
+| --- | --- | --- |
+| `MONGODB_URI` | Yes | Database connection. Must be a replica set (`?replicaSet=rs0` locally) |
+| `JWT_SECRET` | Yes | Signs login tokens. At least 32 characters |
+| `CONVERSION_API_KEY` | Yes | Key the external store sends (as `x-api-key`) when it reports a sale |
+| `PAYOUT_DETAILS_KEY` | Yes | 64 hex characters. Encrypts affiliates' bank and UPI details in the database |
+| `CORS_ORIGINS` | | Dashboard URL(s) allowed to call the API, comma-separated. Locally: `http://localhost:3000` |
+| `DEMO_MODE` | | `true` turns on the dashboard's "Simulate sale" button. Turn it off in a real deployment |
+| `REFERRAL_BASE_URL` | | Start of each affiliate's referral link; the code is added to the end. Default: `https://shop.example.com/?ref=` |
+| `TRUST_PROXY` | | Number of proxies in front of the server (`1` on Render). Needed for per-IP rate limits |
+| `PORT`, `JWT_EXPIRES_IN`, `LOG_LEVEL`, `AUTH_RATE_LIMIT_MAX`, `API_RATE_LIMIT_MAX` | | Optional. The defaults in `.env.example` are fine |
+
+---
+
+## Common problems
+
+| You see | Fix |
+| --- | --- |
+| `Refusing to start. Invalid environment configuration:` followed by a variable name | Run `npm run gen:secrets` and paste the values into `.env` (step 4) |
+| `Transaction numbers are only allowed on a replica set` | MongoDB isn't running as a replica set. Redo step 2 and check that `MONGODB_URI` ends in `?replicaSet=rs0` |
+| Server hangs on start, or `Server selection timed out` | MongoDB isn't running. Start it with `docker start mongo` |
+| `docker: ... name "/mongo" is already in use` | The container already exists. Run `docker start mongo` instead of `docker run` |
+| `EADDRINUSE: address already in use :::4000` | Another process is using port 4000. Stop it or set `PORT` in `.env` |
+| The dashboard shows a CORS error | Add the dashboard's URL to `CORS_ORIGINS` in `.env` and restart the server |
+
+---
+
+## Deploying to Render + Atlas
+
+1. Create a free Atlas cluster. Under **Network Access**, allow `0.0.0.0/0` (fine for a demo).
+2. On Render, choose **New → Blueprint** and select this repo. Render reads `render.yaml` and generates `JWT_SECRET` and `CONVERSION_API_KEY` for you.
+3. Fill in the three remaining values in the Render dashboard:
+   - `MONGODB_URI`: your Atlas connection string
+   - `PAYOUT_DETAILS_KEY`: the value from `npm run gen:secrets`
+   - `CORS_ORIGINS`: your deployed dashboard URL, for example `https://affiliate-frontend.vercel.app`
+4. Seed the production database once, from your computer:
+
+   ```bash
+   # Git Bash / macOS / Linux
+   MONGODB_URI="<atlas connection string>" npm run seed -- --allow-production
+   ```
+
+   ```powershell
+   # PowerShell
+   $env:MONGODB_URI="<atlas connection string>"; npm run seed -- --allow-production
+   ```
+
+5. Open `https://<your-service>.onrender.com/api/health` and check that it returns `{"status":"ok","db":"up"}`.
+
+Render's free tier sleeps when idle, so **the first request can take about 30 seconds**.
+
+---
+
+## API
+
+Base path: `/api`. Errors always look like `{ "error": { "code", "message", "details?" } }`.
+
+| Method | Route | Who can call it | What it does |
 | --- | --- | --- | --- |
-| GET | `/health` | public | Uptime + DB check |
-| GET | `/program` | public | Landing pitch and terms (rate, minimum payout, rules, steps) |
-| POST | `/auth/signup` | public, rate-limited | Affiliate application. Strict whitelist: server sets role, status and referral code |
-| POST | `/auth/login` | public, rate-limited | JWT + user |
-| GET | `/me` | any | Current user (payout details masked) |
-| GET | `/me/summary` | affiliate | Balances in paise + `needsPayoutDetails` / `belowMinimum` |
-| PUT | `/me/payout-method` | active affiliate | UPI or bank (validated UPI/IFSC), stored encrypted |
-| POST | `/me/pause` · `/me/resume` | affiliate | Pause your own account (optional `{ reason }`) and resume it; cannot lift a deactivation made by ops. 20 changes an hour per user |
-| GET | `/me/commissions`, `/me/payouts` | affiliate | Own commissions, own successful payouts with reference |
-| POST | `/conversions` | `x-api-key` | Store webhook: `201` new, `200` identical retry, `409` conflicting retry |
-| POST | `/admin/demo/simulate-sale` | ops, `DEMO_MODE` | Same pipeline as the webhook |
-| GET | `/admin/stats` | ops, finance | Overview numbers |
-| GET | `/admin/affiliates?status=` | ops, finance | List (masked details) |
-| POST | `/admin/affiliates/:id/approve` · `/reject` | ops | Approve takes an optional `{ rateBps }` (1%–50%, defaults to the program rate). Reject requires `{ reason }` |
-| PATCH | `/admin/affiliates/:id/rate` | ops | `{ rateBps }`: change an active affiliate's rate for future sales; audited |
-| POST | `/admin/affiliates/:id/deactivate` · `/reactivate` | ops | Deactivate requires `{ reason }` (also takes over a self-pause): the link goes off, new sales are refused and payouts are held. Reactivate takes an optional `{ note }` |
-| GET | `/admin/commissions?status=` | ops, finance | Queue |
-| POST | `/admin/commissions/approve` · `/reject` | ops | `{ ids }` / `{ ids, reason }`. All-or-nothing |
-| POST / GET | `/admin/payouts` | finance | Create batch (transaction) / list |
-| GET | `/admin/payouts/missing-details` | finance | Owed, but no payout details |
-| GET | `/admin/payouts/:id` | finance | Batch with items |
-| GET | `/admin/payouts/:id/export.csv` | finance | Bank CSV. The only place full details appear. Marks the batch `exported` |
+| GET | `/health` | anyone | Server and database check |
+| GET | `/program` | anyone | Program details: rate, minimum payout, rules, how to join |
+| POST | `/auth/signup` | anyone (rate-limited) | Apply as an affiliate. The server sets the role, status and referral code |
+| POST | `/auth/login` | anyone (rate-limited) | Returns a JWT and the user |
+| GET | `/me` | signed in | Current user (payout details masked) |
+| GET | `/me/summary` | affiliate | Balances in paise, plus `needsPayoutDetails` and `belowMinimum` |
+| PUT | `/me/payout-method` | active affiliate | Save UPI or bank details (validated, stored encrypted) |
+| POST | `/me/pause` · `/me/resume` | affiliate | Pause or resume your own account (optional `{ reason }`). Can't undo a deactivation by ops. Max 20 changes an hour |
+| GET | `/me/commissions` · `/me/payouts` | affiliate | Your commissions; your completed payouts with their payment reference |
+| POST | `/conversions` | `x-api-key` | Store reports a sale. `201` new, `200` identical retry, `409` same order ID with different data |
+| POST | `/admin/demo/simulate-sale` | ops, only when `DEMO_MODE=true` | Records a sale the same way `/conversions` does |
+| GET | `/admin/stats` | ops, finance | Numbers for the overview page |
+| GET | `/admin/affiliates?status=` | ops, finance | List affiliates (details masked) |
+| POST | `/admin/affiliates/:id/approve` · `/reject` | ops | Approve takes an optional `{ rateBps }` (1%–50%, default is the program rate). Reject needs `{ reason }` |
+| PATCH | `/admin/affiliates/:id/rate` | ops | `{ rateBps }`: change the rate for future sales. Logged in the audit trail |
+| POST | `/admin/affiliates/:id/deactivate` · `/reactivate` | ops | Deactivate needs `{ reason }`: the link stops working, new sales are refused and payouts are held. Reactivate takes an optional `{ note }` |
+| GET | `/admin/commissions?status=` | ops, finance | Commission queue |
+| POST | `/admin/commissions/approve` · `/reject` | ops | `{ ids }` or `{ ids, reason }`. Either all succeed or none do |
+| POST · GET | `/admin/payouts` | finance | Create a payout batch · list batches |
+| GET | `/admin/payouts/missing-details` | finance | Affiliates who are owed money but have no payout details |
+| GET | `/admin/payouts/:id` | finance | One batch with its items |
+| GET | `/admin/payouts/:id/export.csv` | finance | Download the bank CSV (the only place full details appear). Marks the batch `exported` |
 | POST | `/admin/payouts/:id/confirm` | finance | `{ paymentReference, failedItems?: [{ affiliateId, reason }] }` |
-| POST | `/admin/payouts/:id/cancel` | finance | Draft batches only |
+| POST | `/admin/payouts/:id/cancel` | finance | Cancel a batch that's still a draft |
 
-### Payout CSV
+### Payout CSV format
 
-This simulates a generic bulk-transfer upload. It isn't claimed to match any specific bank's format.
+A generic bulk-transfer file. It doesn't follow any particular bank's format.
 
-```
+```csv
 batch_no,affiliate_id,beneficiary_name,method,upi_id,account_number,ifsc,amount_inr,commission_count,narration
 PB-0002,6ae0…b325,Asha Verma,upi,asha.verma@okhdfc,,,600.00,1,Affiliate payout PB-0002
 ```
 
-Amounts are rupees with two decimals, converted from paise only at export. Cells that a spreadsheet would execute (`= + - @`) are neutralised.
+Amounts are in rupees with two decimals. Cells starting with `= + - @` are escaped so spreadsheets don't run them as formulas.
 
 ---
 
-## 5. What I built for v1, and why
+## How it works
 
-**One lifecycle across three teams, done properly**, rather than many half-features. Each of the three problems gets the smallest thing that actually fixes it:
+- **One API, roles on the user.** Each user is `affiliate`, `ops` or `finance`, and every route checks the role. The role and account status are read from the database on every request, so a deactivated user loses access straight away.
+- **Commissions are the source of truth.** A payout batch only groups commissions. Its totals can always be recalculated from the commissions in it, and at confirm time `paid + failed = original total` is checked.
+- **Money is stored as whole numbers.** Amounts are in paise and rates in basis points, so there are no floating-point errors. Rounding is done in one place (`src/utils/money.js`). Each commission keeps the rate it was created with, so changing an affiliate's rate never changes past commissions.
+- **Only one open payout batch at a time.** A unique index enforces this, even if two people click "Create" at once. Draft batches can be cancelled. Exported batches can't, because the bank may already have sent money; finance closes them by confirming and marking any failed items.
+- **Safe retries for sales.** Sending the same order twice with the same data does nothing (`200`). Sending the same order ID with a different amount or code is rejected (`409`).
+- **Referral links only work after approval.** Sales for affiliates who aren't active are refused.
+- **Pausing and deactivating.** An affiliate can pause their own account and resume later. Ops can deactivate an account with a reason, which also holds that affiliate's payouts. If a held affiliate was already in an exported batch, finance must say at confirm time whether the bank actually paid them.
 
-| Problem | v1 answer |
-| --- | --- |
-| **Too few sign-ups** | A pitch screen driven by `GET /program` (rate, minimum payout, what qualifies, how payouts work). Sign-up is under a minute: name, email, password and where you'll promote. **No bank details up front**: asking a stranger for them before they've earned anything is friction and erodes trust. You get instant "application received" feedback, then a shareable link (native share sheet) the moment you're approved. |
-| **Ops can't track and release commissions** | Every commission has a server-enforced status, a **snapshotted rate** and a full history (who, what, when, why). It moves with one click or in bulk. Rejections need a reason. Any illegal transition returns `409`. |
-| **Finance struggles to pay** | Approved commissions are **reserved** into a batch. Finance downloads a documented CSV for the bank and marks it paid only after confirming with a **payment reference**. Failed transfers are recorded per affiliate with a reason and retried automatically next run. Affiliates without payout details are surfaced, not silently dropped. |
+### Security
 
-## 6. Key decisions and tradeoffs
+- Bank and UPI details are encrypted in the database (AES-256-GCM). The API only returns a masked form like `UPI: ra***@okhdfc`. Full details appear only in the finance CSV.
+- Every request body is validated with a strict zod schema. Unknown fields are rejected with `400`.
+- Passwords are hashed with bcrypt (cost 12). JWTs have a fixed algorithm, issuer and audience.
+- The API key is compared in constant time. The server also uses `helmet`, a CORS allow-list, per-IP rate limits and a 50 kB body limit.
+- Logs are structured (pino) with secrets redacted. Clients never see stack traces or raw database errors.
 
-- **One backend, role-based access.** Mobile and dashboard are thin clients of the same API, so rules exist in exactly one place. Next.js is used purely as a frontend: no API routes or server actions with business logic.
-- **Commissions are the source of truth.** A batch only groups and reconciles. Its totals can always be recomputed from the commissions that point at it. `originalTotalPaise` is fixed at creation. At confirm, `paidPaise + failedPaise = originalTotalPaise` is checked inside the transaction.
-- **Integer money.** Paise and basis points, half-up rounding implemented once (`src/utils/money.js`, BigInt-exact) and unit-tested. The rate is snapshotted on each commission, so changing a rate never rewrites history.
-- **Transactional, single-open-batch payouts.** Every open batch carries `openBatchKey: 'OPEN'` under a partial unique index, so a second open batch (draft *or* exported) is impossible even with concurrent clicks. It's tested with parallel requests. All updates are status-guarded with modified-count checks. An empty batch rolls back and leaves no lock. Drafts can be cancelled. Exported batches can't be, because money may have moved: they're closed via confirm with failed items instead.
-- **Payload-aware idempotency for sales.** The same `orderId` with the same payload is a safe retry (`200`). The same `orderId` with a different amount or code is a conflict (`409`, naming the differing fields), never silently treated as a duplicate. Conversion + commission + audit entry are written in one transaction. A concurrent duplicate is resolved outside the aborted transaction.
-- **CSV + manual confirmation instead of a payment gateway.** This is honest for v1: finance can operate it today, and the reference + per-item failure model maps cleanly onto a gateway later.
-- **Commission rate per affiliate, set at approval.** Ops picks the rate when approving (prefilled with the program's standard rate) and can change it later from the dashboard. A change applies to new sales only, because each commission keeps the rate it was created with, and every change is in the audit log. The app shows the standard rate as a guide and each affiliate's own rate once approved.
-- **Pausing without losing history.** An affiliate can pause themselves from the app and resume later: the link is off and new sales are refused, but what they already earned is still paid and they can keep their payout details up to date. Ops can deactivate an affiliate (reason required), including taking over a self-pause: then **payouts are held**: batch creation skips them, and if they were already in an open batch: a draft can't be exported, re-downloading an exported CSV leaves them out (recorded on the batch), and confirm makes finance say, for anyone on hold or ever left out of a download, whether the bank already sent their transfer (record it as paid, audited) or not (mark it failed; the money stays held). The system can't know whether money left the bank after the CSV did, so it asks instead of guessing and payout details are locked until ops reactivates them, which suits a fraud review. Rate and referral code are kept either way. Affiliates approved before per-affiliate rates can be given a stored rate with `npm run backfill:rates`.
-- **Referral link activates only on approval.** Sign-up stays frictionless, while unvetted accounts can't earn: conversions for non-active affiliates are refused.
-- **Payout details after approval, not at sign-up.** A shorter form converts better, and sensitive data is only requested once there's a reason to give it.
-- **Security posture** (beyond the plan's baseline):
-  - Bank/UPI details are **encrypted at rest (AES-256-GCM)**. Only a masked form (`UPI: ra***@okhdfc`, `Bank: ****4821`) is stored in clear or ever returned. Full details are decrypted in exactly one place: the finance CSV export.
-  - Strict zod schemas on every input (unknown fields → `400`), so role escalation or operator injection via JSON can't reach a query.
-  - bcrypt (cost 12) with timing-equalised login. JWT with pinned algorithm/issuer/audience. Role and status are re-read from the DB on every request, so a revoked user loses access immediately.
-  - Constant-time API-key comparison. `helmet`, a CORS allow-list, per-IP rate limits on auth and on the whole API, a 50 kB body limit.
-  - Redacted structured logs (pino). A central error handler: no stack traces or Mongo errors ever reach a client.
-  - Fail-fast config validation. The release APK refuses non-https API URLs. The JWT is kept in the Android Keystore (SecureStore). The dashboard ships a strict CSP and `frame-ancestors 'none'`.
-- **React Native for affiliates, Next.js for staff.** The brief's React Native requirement applies to the affiliate-facing app, which is React Native (Expo). The ops/finance dashboard is an internal desktop tool built on tables and forms, so it uses Next.js (React): the same TypeScript/React skill set, without React Native Web's table and form limitations.
-- **Expo + EAS** for a reliable signed APK without a local Android toolchain. **Next.js on Vercel** for the internal dashboard.
+---
 
-**Deliberate cuts** (would come next): real gateway payouts, click tracking and attribution windows, fraud scoring, refund holding period, automatic tiered or per-product rates, email/push notifications, tax/KYC, multi-currency (INR only).
+## Key decisions and tradeoffs
 
-## 7. What I'd do next
+| Decision | Why | Tradeoff |
+| --- | --- | --- |
+| **One API for both apps, with roles** | Rules live in one place, so the app and dashboard always agree | Every client depends on this one server |
+| **Money stored as whole paise** | No rounding errors from decimals | Amounts must be converted for display and CSV |
+| **Each commission keeps its own rate** | Changing a rate never changes past earnings | Slightly more data per commission |
+| **Commissions are the source of truth** | Batch totals can always be recalculated and checked | Totals are recomputed instead of just read |
+| **Only one open payout batch at a time** | Nobody can be paid twice by two overlapping batches | Finance must finish or cancel a batch before starting the next |
+| **CSV + manual confirmation instead of a gateway** | Works with any bank today, no gateway contract needed | Finance uploads the file and types in the payment reference by hand |
+| **Static API key for the store's sales webhook** | Simple for the store to set up | Weaker than a signed webhook if the key leaks |
+| **MongoDB replica set required** | Transactions keep sales, commissions and payouts consistent | Local setup needs one extra command |
 
-1. **HMAC-signed webhooks** with timestamp + replay window, replacing the static API key.
-2. **Reconciliation for exported batches**: import the bank statement, auto-match by reference and amount, and flag mismatches.
-3. **Refund holding period**: commissions become approvable only after the return window, with clawbacks on refunds.
-4. **Gateway payouts** (RazorpayX / Stripe Connect) driven by the same batch model, with webhooks updating item status.
-5. **Click tracking and attribution windows**, a per-affiliate conversion funnel, and **fraud signals** (self-referral, velocity, coupon sites).
-6. **Notifications**: push/email on approval, commission approved and payout sent.
-7. **Session hardening**: httpOnly-cookie sessions for the dashboard, refresh-token rotation, staff 2FA, and key rotation for `PAYOUT_DETAILS_KEY` (the ciphertext is already versioned `v1.`).
-8. A separate internal note for ops on deactivations (today the reason is shown to the affiliate, like a rejection reason). Editable program settings in the dashboard, automatic tiered rates (by volume) and per-product rates on top of today's per-affiliate rate, and an audit-log viewer.
-9. **Snapshot payout details on the batch.** The CSV currently uses each affiliate's payout details as they are at export time, so an edit between batch creation and export changes where the money goes. Freezing them at batch creation (or flagging the change to finance) makes the export match what was reviewed.
+## What we'd add with more time
+
+- **Payment gateway payouts** (RazorpayX or Stripe Connect), using the same batch model
+- **Bank statement matching**: upload the statement and mark payments as confirmed automatically
+- **Refund holding period**: commissions can be approved only after the return window ends
+- **Signed webhooks** (HMAC with a timestamp) instead of the static API key
+- **Click tracking and fraud checks** (self-referrals, sudden spikes)
+- **Email and push notifications** when an affiliate is approved, earns a commission or gets paid
+- **Tiered rates**: affiliates who sell more earn a higher rate
+- **Saving payout details on the batch**, so the CSV uses the details finance reviewed
+
+---
 
 ## Project layout
 
-```
+```text
 src/
-  app.js                 Express app factory (no side effects: used by server and tests)
-  server.js              Config validation → DB connect → listen, graceful shutdown
-  config/env.js          zod-validated, frozen configuration (fail fast)
-  db/connect.js          Connection + up-front collection/index creation
-  models/                6 collections + shared enums
-  middleware/            auth/roles, API key, validation, rate limits, error handler
-  modules/<feature>/     routes · service · schemas per feature
-    auth  program  me  conversions  affiliates  commissions  payouts  stats  demo  audit
-  modules/serializers.js The only response shapes (secrets can't leak by accident)
-  utils/                 money, field encryption, masking, CSV, transactions, logger
-scripts/seed.js          Demo data created through the real services
-tests/                   unit/ + integration/ (Jest + Supertest + mongodb-memory-server replica set)
+  app.js                 Builds the Express app (used by server.js and the tests)
+  server.js              Checks config, connects to the database, starts listening
+  config/env.js          Reads and validates environment variables
+  db/connect.js          Database connection and index setup
+  models/                The 6 MongoDB collections
+  middleware/            Auth and roles, API key check, validation, rate limits, error handler
+  modules/<feature>/     routes, service and schemas for each feature:
+                         auth, program, me, conversions, affiliates, commissions, payouts, stats, demo, audit
+  modules/serializers.js Shapes every API response, so secrets can't leak by accident
+  utils/                 Money, encryption, masking, CSV, transactions, logger
+scripts/                 seed, gen:secrets, backfill:rates
+tests/                   unit/ and integration/ (Jest + Supertest + in-memory MongoDB)
 ```
