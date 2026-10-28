@@ -219,6 +219,13 @@ async function exportBatchCsv(id, actor, { cipher }) {
       if (batch.status === 'draft') throw heldInDraft(heldNow);
       throw conflict('A payout was put on hold while exporting. Download the CSV again.', { affiliates: heldNow }, 'PAYOUT_ON_HOLD');
     }
+    if (held.length > 0) {
+      await PayoutBatch.updateOne(
+        { _id: batch._id, status: 'exported' },
+        { $set: { 'items.$[held].excludedFromExport': true } },
+        { arrayFilters: [{ 'held.affiliateId': { $in: held.map((h) => h.affiliateId) } }], session },
+      );
+    }
     const note = held.length > 0 ? `${label}, left out on hold: ${heldNames(held)}` : label;
     await recordAudit(
       [{ actor, entity: 'PayoutBatch', entityId: batch._id, action: 'export', from: batch.status, to: 'exported', note }],
@@ -248,10 +255,11 @@ function validateFailedItems(batch, failedItems) {
  * approved and are retried next batch), every other item is paid. All
  * counts and amounts are checked against the commissions before commit.
  *
- * An affiliate put on hold after the CSV left the system may or may not have
- * been paid by the bank, so finance must say which: list them in failedItems
- * (not sent; the commissions return to approved and stay held) or in
- * heldPaidAcknowledged (the bank already sent it; recorded as paid and audited).
+ * Some items need an explicit answer, because the system can't know whether the
+ * bank paid them: affiliates on hold now, and affiliates any CSV download left
+ * out (even if their hold has since been lifted, the file finance used may not
+ * have included them). Finance lists each in failedItems (not sent) or in
+ * heldPaidAcknowledged (the bank sent it; recorded as paid and audited).
  * Guessing either way risks paying twice or recording money that never moved.
  */
 async function confirmBatch(id, { paymentReference, failedItems, heldPaidAcknowledged }, actor) {
@@ -268,18 +276,30 @@ async function confirmBatch(id, { paymentReference, failedItems, heldPaidAcknowl
 
     const held = await findHeldItems(batch, session);
     const heldIds = new Set(held.map((h) => h.affiliateId));
+    const names = new Map(held.map((h) => [h.affiliateId, h.name]));
+    const excluded = batch.items.filter((i) => i.excludedFromExport).map((i) => String(i.affiliateId));
+    if (excluded.some((affiliateId) => !names.has(affiliateId))) {
+      const users = await User.find({ _id: { $in: excluded } }, { name: 1 }).session(session).lean();
+      for (const u of users) if (!names.has(String(u._id))) names.set(String(u._id), u.name);
+    }
+    const needsDecision = new Set([...heldIds, ...excluded]);
     const paidWhileHeld = new Set(heldPaidAcknowledged);
-    const notHeld = heldPaidAcknowledged.filter((affiliateId) => !heldIds.has(affiliateId));
+    const notHeld = heldPaidAcknowledged.filter((affiliateId) => !needsDecision.has(affiliateId));
     if (notHeld.length > 0) {
-      throw badRequest('heldPaidAcknowledged lists affiliates whose payouts are not on hold in this batch', { affiliateIds: notHeld });
+      throw badRequest(
+        'heldPaidAcknowledged lists affiliates that were neither on hold nor left out of an export. Refresh the batch and try again.',
+        { affiliateIds: notHeld },
+      );
     }
     if (heldPaidAcknowledged.some((affiliateId) => failedReasons.has(affiliateId))) {
       throw badRequest('An affiliate cannot be both failed and acknowledged as paid');
     }
-    const undecided = held.filter((h) => !failedReasons.has(h.affiliateId) && !paidWhileHeld.has(h.affiliateId));
+    const undecided = [...needsDecision]
+      .filter((affiliateId) => !failedReasons.has(affiliateId) && !paidWhileHeld.has(affiliateId))
+      .map((affiliateId) => ({ affiliateId, name: names.get(affiliateId) ?? affiliateId }));
     if (undecided.length > 0) {
       throw conflict(
-        `Payouts are on hold for ${heldNames(undecided)}. Say whether the bank already sent their transfer: mark it as failed if not, or acknowledge it as paid if it went out.`,
+        `Say whether the bank already sent the transfer for ${heldNames(undecided)} (on hold, or left out of a CSV download): mark it as failed if not, or acknowledge it as paid if it went out. If this doesn't match what you see, refresh the batch.`,
         { affiliates: undecided },
         'PAYOUT_ON_HOLD',
       );
@@ -307,8 +327,8 @@ async function confirmBatch(id, { paymentReference, failedItems, heldPaidAcknowl
       const to = failed ? 'approved' : 'paid';
       const heldPaid = paidWhileHeld.has(affiliateKey);
       const note = failed
-        ? `Payout ${label} failed: ${reason}. Retrying in the next payout.`
-        : `Paid in ${label} (ref ${paymentReference})${heldPaid ? '; transfer had already gone out when the payout was put on hold' : ''}`;
+        ? `Payout ${label} failed: ${reason}. ${heldIds.has(affiliateKey) ? 'On hold until the affiliate team reactivates the account.' : 'Retrying in the next payout.'}`
+        : `Paid in ${label} (ref ${paymentReference})${heldPaid ? '; finance confirmed the bank sent it although the payout was on hold or left out of a CSV download' : ''}`;
       const update = await Commission.updateMany(
         { _id: { $in: own.map((c) => c._id) }, payoutBatchId: batch._id, status: 'processing' },
         {
@@ -332,7 +352,7 @@ async function confirmBatch(id, { paymentReference, failedItems, heldPaidAcknowl
           entity: 'User',
           entityId: item.affiliateId,
           action: 'held_payout_acknowledged_paid',
-          note: `${label}: finance confirmed the bank had already sent ${paiseToRupeeString(item.amountPaise)} before the hold`,
+          note: `${label}: finance confirmed the bank sent ${paiseToRupeeString(item.amountPaise)} although it was on hold or left out of a CSV download`,
         });
       }
     }

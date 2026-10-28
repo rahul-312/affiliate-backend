@@ -420,4 +420,30 @@ describe('pausing: payouts, payout details and takeovers', () => {
     await admin(held.affiliate, 'reactivate', { note: 'Review cleared' }).expect(200);
     expect((await request(app).post('/api/admin/payouts').set(actors.financeAuth)).status).toBe(409);
   });
+
+  it('still asks about an affiliate left out of a CSV download after their hold is lifted', async () => {
+    const held = await payable();
+    await payable();
+    const { batchId } = await createAndExportBatch(app, actors.financeAuth);
+    await admin(held.affiliate, 'deactivate', { reason: 'Fraud review' }).expect(200);
+    await request(app).get(`/api/admin/payouts/${batchId}/export.csv`).set(actors.financeAuth).expect(200); // leaves them out
+    await admin(held.affiliate, 'reactivate', {}).expect(200);
+    const heldId = String(held.affiliate._id);
+
+    const detail = await request(app).get(`/api/admin/payouts/${batchId}`).set(actors.financeAuth).expect(200);
+    expect(detail.body.items.find((i) => i.affiliate.id === heldId)).toMatchObject({ onHold: false, excludedFromExport: true });
+
+    const confirm = (body) =>
+      request(app).post(`/api/admin/payouts/${batchId}/confirm`).set(actors.financeAuth).send({ paymentReference: 'UTR999', ...body });
+    const undecided = await confirm({});
+    expect(undecided.status).toBe(409);
+    expect(undecided.body.error.details.affiliates).toEqual([{ affiliateId: heldId, name: held.affiliate.name }]);
+
+    // Not sent: back to approved, and no longer held, so the next batch pays them.
+    await confirm({ failedItems: [{ affiliateId: heldId, reason: 'Left out of the CSV we uploaded' }] }).expect(200);
+    const history = (await Commission.findOne({ affiliateId: held.affiliate._id }).lean()).history.at(-1);
+    expect(history.note).toMatch(/Retrying in the next payout/);
+    const next = await request(app).post('/api/admin/payouts').set(actors.financeAuth).expect(201);
+    expect(next.body.batch.items.map((i) => i.affiliate.id)).toEqual([heldId]);
+  });
 });

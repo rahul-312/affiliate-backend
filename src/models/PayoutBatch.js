@@ -10,6 +10,9 @@ const batchItemSchema = new Schema(
     commissionCount: { type: Number, required: true, min: 1 },
     status: { type: String, enum: BATCH_ITEM_STATUSES, required: true, default: 'pending' },
     failureReason: String,
+    // Set when a CSV download left this affiliate out because their payout was on hold. Whatever
+    // happens to the hold later, finance must say at confirm whether the bank actually paid them.
+    excludedFromExport: { type: Boolean, default: undefined },
   },
   { _id: false },
 );

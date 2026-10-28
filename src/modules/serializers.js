@@ -78,6 +78,8 @@ function serializeBatchItem(item) {
     // Ops deactivated this affiliate after the batch was created and the item isn't resolved yet.
     onHold:
       item.status === 'pending' && isPopulated(affiliate) && affiliate.status === 'deactivated' && affiliate.deactivatedByRole === 'ops',
+    // A CSV download left this affiliate out (they were on hold then); finance must say at confirm whether they were paid.
+    excludedFromExport: item.status === 'pending' && Boolean(item.excludedFromExport),
     amountPaise: item.amountPaise,
     commissionCount: item.commissionCount,
     status: item.status,
