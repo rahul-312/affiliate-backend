@@ -380,6 +380,11 @@ describe('pausing: payouts, payout details and takeovers', () => {
     expect(refused.body.error.code).toBe('PAYOUT_ON_HOLD');
     expect(refused.body.error.details.affiliates).toEqual([{ affiliateId: String(held.affiliate._id), name: held.affiliate.name }]);
 
+    // Re-downloading the exported CSV leaves the held affiliate out.
+    const csv = await request(app).get(`/api/admin/payouts/${batchId}/export.csv`).set(actors.financeAuth).expect(200);
+    expect(csv.text).toContain(String(other.affiliate._id));
+    expect(csv.text).not.toContain(String(held.affiliate._id));
+
     const ok = await confirm([{ affiliateId: String(held.affiliate._id), reason: 'Payout on hold: affiliate deactivated' }]);
     expect(ok.status).toBe(200);
     expect((await Commission.find({ affiliateId: held.affiliate._id }).lean()).map((c) => c.status)).toEqual(['approved']);
@@ -389,5 +394,30 @@ describe('pausing: payouts, payout details and takeovers', () => {
     const next = await request(app).post('/api/admin/payouts').set(actors.financeAuth);
     expect(next.status).toBe(409);
     expect(next.body.error.details.skippedOnHold).toBe(1);
+  });
+
+  it('records a held affiliate as paid when finance confirms the bank already sent it, so it is never paid twice', async () => {
+    const held = await payable();
+    const other = await payable();
+    const { batchId } = await createAndExportBatch(app, actors.financeAuth);
+    await admin(held.affiliate, 'deactivate', { reason: 'Fraud review' }).expect(200);
+    const heldId = String(held.affiliate._id);
+    const confirm = (body) =>
+      request(app).post(`/api/admin/payouts/${batchId}/confirm`).set(actors.financeAuth).send({ paymentReference: 'UTR888', ...body });
+
+    expect((await confirm({ heldPaidAcknowledged: [String(other.affiliate._id)] })).status).toBe(400); // not on hold
+    expect(
+      (await confirm({ heldPaidAcknowledged: [heldId], failedItems: [{ affiliateId: heldId, reason: 'Not sent' }] })).status,
+    ).toBe(400); // can't be both
+
+    const ok = await confirm({ heldPaidAcknowledged: [heldId] });
+    expect(ok.status).toBe(200);
+    expect(ok.body.status).toBe('paid');
+    expect((await Commission.find({ affiliateId: held.affiliate._id }).lean()).map((c) => c.status)).toEqual(['paid']);
+    expect(await AuditLog.countDocuments({ entityId: held.affiliate._id, action: 'held_payout_acknowledged_paid' })).toBe(1);
+
+    // Nothing is left to pay them again after reactivation.
+    await admin(held.affiliate, 'reactivate', { note: 'Review cleared' }).expect(200);
+    expect((await request(app).post('/api/admin/payouts').set(actors.financeAuth)).status).toBe(409);
   });
 });
