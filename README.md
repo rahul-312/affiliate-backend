@@ -5,8 +5,8 @@ The single API behind the Affiliate Hub v1: affiliate sign-up and approval, comm
 | Repo | What it is | Stack |
 | --- | --- | --- |
 | **affiliate-backend** (this repo) | The one API and every business rule | Node.js 22, Express 5, MongoDB (Mongoose), zod, JWT |
-| [affiliate-frontend](../affiliate-frontend) | Internal tool for the ops (affiliate) and finance teams | Next.js 16 (App Router), TypeScript |
-| [affiliate-mobile](../affiliate-mobile) | Affiliate-facing app, shipped as an Android APK | React Native, Expo SDK 58, Expo Router |
+| [affiliate-frontend](https://github.com/rahul-312/affiliate-frontend) | Internal tool for the ops (affiliate) and finance teams | Next.js 16 (App Router), TypeScript |
+| [affiliate-mobile](https://github.com/rahul-312/affiliate-mobile) | Affiliate-facing app, shipped as an Android APK | React Native, Expo SDK 58, Expo Router |
 
 ---
 
@@ -92,7 +92,7 @@ The server **refuses to start** if `MONGODB_URI`, `JWT_SECRET`, `CONVERSION_API_
 | `PAYOUT_DETAILS_KEY` | ✔ | 64 hex chars. AES-256-GCM key for bank/UPI details at rest |
 | `CORS_ORIGINS` | | Comma-separated dashboard origin(s) |
 | `DEMO_MODE` | | `true` enables `POST /api/admin/demo/simulate-sale` (ops only) |
-| `REFERRAL_BASE_URL` | | Prefix for shareable links (`…?ref=CODE`) |
+| `REFERRAL_BASE_URL` | | Prefix for shareable links (`…?ref=CODE`). Defaults to the placeholder `https://shop.example.com/?ref=`; in a real deployment this is the store's URL |
 | `TRUST_PROXY` | | Number of proxies in front (Render: `1`), used for per-IP rate limits |
 | `JWT_EXPIRES_IN`, `LOG_LEVEL`, `AUTH_RATE_LIMIT_MAX`, `API_RATE_LIMIT_MAX`, `PORT` | | Have sensible defaults |
 
@@ -195,6 +195,7 @@ Amounts are rupees with two decimals, converted from paise only at export. Cells
   - Constant-time API-key comparison. `helmet`, a CORS allow-list, per-IP rate limits on auth and on the whole API, a 50 kB body limit.
   - Redacted structured logs (pino). A central error handler: no stack traces or Mongo errors ever reach a client.
   - Fail-fast config validation. The release APK refuses non-https API URLs. The JWT is kept in the Android Keystore (SecureStore). The dashboard ships a strict CSP and `frame-ancestors 'none'`.
+- **React Native for affiliates, Next.js for staff.** The brief's React Native requirement applies to the affiliate-facing app, which is React Native (Expo). The ops/finance dashboard is an internal desktop tool built on tables and forms, so it uses Next.js (React): the same TypeScript/React skill set, without React Native Web's table and form limitations.
 - **Expo + EAS** for a reliable signed APK without a local Android toolchain. **Next.js on Vercel** for the internal dashboard.
 
 **Deliberate cuts** (would come next): real gateway payouts, click tracking and attribution windows, fraud scoring, refund holding period, tiered rates, email/push notifications, tax/KYC, multi-currency (INR only).
@@ -209,6 +210,7 @@ Amounts are rupees with two decimals, converted from paise only at export. Cells
 6. **Notifications**: push/email on approval, commission approved and payout sent.
 7. **Session hardening**: httpOnly-cookie sessions for the dashboard, refresh-token rotation, staff 2FA, and key rotation for `PAYOUT_DETAILS_KEY` (the ciphertext is already versioned `v1.`).
 8. Editable program settings in the dashboard, tiered or per-product rates, and an audit-log viewer.
+9. **Snapshot payout details on the batch.** The CSV currently uses each affiliate's payout details as they are at export time, so an edit between batch creation and export changes where the money goes. Freezing them at batch creation (or flagging the change to finance) makes the export match what was reviewed.
 
 ## Project layout
 
